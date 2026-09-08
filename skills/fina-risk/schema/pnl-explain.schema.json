@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pnl-explain.schema.json",
+  "title": "PnLExplain",
+  "type": "object",
+  "required": ["valuation_date", "actual_pnl"],
+  "properties": {
+    "valuation_date": {"type": "string", "format": "date"},
+    "actual_pnl": {"type": "number"},
+    "forecast_pnl": {"type": "number"},
+    "unexplained_pnl": {"type": "number"},
+    "components": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "factor_id": {"type": "string"},
+          "measure": {"type": "string"},
+          "contribution": {"type": "number"}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

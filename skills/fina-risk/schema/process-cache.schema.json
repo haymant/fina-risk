@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "process-cache.schema.json",
+  "title": "ProcessCache",
+  "type": "object",
+  "required": ["process_id", "model_type", "market_version"],
+  "properties": {
+    "process_id": {"type": "string"},
+    "model_type": {"type": "string"},
+    "market_version": {"type": "string"},
+    "risk_factor_ids": {"type": "array", "items": {"type": "string"}},
+    "curve_refs": {"type": "array", "items": {"type": "string"}},
+    "surface_refs": {"type": "array", "items": {"type": "string"}},
+    "correlation_ref": {"type": "string"},
+    "created_at": {"type": "string", "format": "date-time"}
+  },
+  "additionalProperties": false
+}

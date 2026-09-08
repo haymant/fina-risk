@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "risk-cube.schema.json",
+  "title": "RiskCubeArchive",
+  "type": "object",
+  "required": ["cube_id", "valuation"],
+  "properties": {
+    "cube_id": {"type": "string"},
+    "valuation": {
+      "type": "object",
+      "properties": {
+        "pv": {"type": "number"},
+        "currency": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "axes": {"type": "array", "items": {"type": "string"}},
+    "aggregation_level": {"enum": ["TRADE", "LEG", "FEATURE", "PORTFOLIO"]},
+    "cell_count": {"type": "integer"}
+  },
+  "additionalProperties": false
+}

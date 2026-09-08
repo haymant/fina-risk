@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "portfolio-risk.schema.json",
+  "title": "PortfolioRisk",
+  "type": "object",
+  "required": ["portfolio_id", "valuation_timestamp"],
+  "properties": {
+    "portfolio_id": {"type": "string"},
+    "valuation_timestamp": {"type": "string", "format": "date-time"},
+    "pv": {"type": "number"},
+    "currency": {"type": "string"},
+    "risk_cube_ref": {"type": "string"},
+    "trade_count": {"type": "integer"}
+  },
+  "additionalProperties": false
+}

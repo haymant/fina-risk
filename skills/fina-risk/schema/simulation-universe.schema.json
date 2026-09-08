@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "simulation-universe.schema.json",
+  "title": "SimulationUniverse",
+  "type": "object",
+  "required": ["universe_id", "market_version"],
+  "properties": {
+    "universe_id": {"type": "string"},
+    "market_version": {"type": "string"},
+    "underlyings": {"type": "array", "items": {"type": "string"}},
+    "model_type": {"type": "string"},
+    "calendar_id": {"type": "string"},
+    "observation_schedule_hash": {"type": "string"},
+    "trade_ids": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": false
+}

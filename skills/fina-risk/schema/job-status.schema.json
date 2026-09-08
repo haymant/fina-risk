@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "job-status.schema.json",
+  "title": "JobStatus",
+  "type": "object",
+  "required": ["job_id", "status"],
+  "properties": {
+    "job_id": {"type": "string"},
+    "status": {"enum": ["PENDING", "RUNNING", "COMPLETED", "FAILED"]},
+    "submitted_at": {"type": "string", "format": "date-time"},
+    "started_at": {"type": "string", "format": "date-time"},
+    "completed_at": {"type": "string", "format": "date-time"},
+    "worker_id": {"type": "string"}
+  },
+  "additionalProperties": false
+}

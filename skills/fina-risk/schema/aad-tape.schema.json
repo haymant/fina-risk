@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "aad-tape.schema.json",
+  "title": "AADTapeMetadata",
+  "type": "object",
+  "required": ["tape_id", "valuation_graph_id"],
+  "properties": {
+    "tape_id": {"type": "string"},
+    "valuation_graph_id": {"type": "string"},
+    "node_count": {"type": "integer"},
+    "edge_count": {"type": "integer"},
+    "adjoint_enabled": {"type": "boolean"},
+    "tape_size_bytes": {"type": "integer"}
+  },
+  "additionalProperties": false
+}

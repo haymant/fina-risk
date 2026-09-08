@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "path-cube-archive.schema.json",
+  "title": "PathCubeArchive",
+  "type": "object",
+  "required": ["archive_id", "cube_id"],
+  "properties": {
+    "archive_id": {"type": "string"},
+    "cube_id": {"type": "string"},
+    "object_uri": {"type": "string"},
+    "compression": {"enum": ["zstd", "snappy", "gzip"]},
+    "row_count": {"type": "integer"}
+  },
+  "additionalProperties": false
+}

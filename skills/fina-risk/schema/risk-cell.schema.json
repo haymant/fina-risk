@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "risk-cell.schema.json",
+  "title": "RiskCubeCell",
+  "type": "object",
+  "required": ["risk_factor_id", "measure", "value"],
+  "properties": {
+    "risk_factor_id": {"type": "string"},
+    "measure": {"type": "string"},
+    "value": {"type": "number"},
+    "currency": {"type": "string"},
+    "method": {"enum": ["AAD", "PATHWISE", "LRM", "FD"]},
+    "fallback_reason": {"type": ["string", "null"]}
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "path-cube.schema.json",
+  "title": "PathCubeMetadata",
+  "type": "object",
+  "required": ["cube_id", "universe_id", "path_count", "time_steps", "factor_count"],
+  "properties": {
+    "cube_id": {"type": "string"},
+    "universe_id": {"type": "string"},
+    "simulation_model": {"type": "string"},
+    "path_count": {"type": "integer"},
+    "time_steps": {"type": "integer"},
+    "factor_count": {"type": "integer"},
+    "precision": {"enum": ["f32", "f64"]},
+    "storage_backend": {"enum": ["gpu", "ram", "shared_memory"]},
+    "memory_bytes": {"type": "integer"}
+  },
+  "additionalProperties": false
+}

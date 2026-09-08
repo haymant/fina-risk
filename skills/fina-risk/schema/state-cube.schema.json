@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "state-cube.schema.json",
+  "title": "StateCube",
+  "type": "object",
+  "required": ["state_cube_id", "path_cube_id"],
+  "properties": {
+    "state_cube_id": {"type": "string"},
+    "path_cube_id": {"type": "string"},
+    "states": {"type": "array", "items": {"type": "string"}},
+    "dimensions": {
+      "type": "object",
+      "properties": {
+        "paths": {"type": "integer"},
+        "dates": {"type": "integer"},
+        "states": {"type": "integer"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

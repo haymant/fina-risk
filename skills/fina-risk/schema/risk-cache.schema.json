@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "risk-cache.schema.json",
+  "title": "RiskCache",
+  "type": "object",
+  "required": ["risk_run_id", "market_version"],
+  "properties": {
+    "risk_run_id": {"type": "string"},
+    "market_version": {"type": "string"},
+    "risk_cube_ref": {"type": "string"},
+    "method": {"enum": ["AAD", "PATHWISE", "LRM", "FD"]},
+    "generated_at": {"type": "string", "format": "date-time"}
+  },
+  "additionalProperties": false
+}

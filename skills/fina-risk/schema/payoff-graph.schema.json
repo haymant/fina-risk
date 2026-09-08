@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "payoff-graph.schema.json",
+  "title": "PayoffGraph",
+  "type": "object",
+  "required": ["graph_id", "graph_type"],
+  "properties": {
+    "graph_id": {"type": "string"},
+    "graph_type": {"enum": ["PAYOFF", "STATE", "AAD", "VALUATION"]},
+    "root_node": {"type": "string"},
+    "node_count": {"type": "integer"},
+    "graph_hash": {"type": "string"}
+  },
+  "additionalProperties": false
+}
