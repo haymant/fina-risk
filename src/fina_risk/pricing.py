@@ -390,6 +390,7 @@ def bump_result(common: dict[str, Any], *, paths: int | None = None, seed: int =
         {"label": "base", "spots": market.quoted_spots.tolist(), "price": base["put_option_price"]}
     ]
     fd_deltas: list[dict[str, Any]] = []
+    notional = float(common.get("dealData", {}).get("notional", 1.0))
     for i, name in enumerate(market.names):
         bump = 0.01 * market.quoted_spots[i]
         for sign in (1, -1):
@@ -405,6 +406,8 @@ def bump_result(common: dict[str, Any], *, paths: int | None = None, seed: int =
                 "risk_factor_id": f"EQ:{name}:SPOT",
                 "measure": "delta",
                 "value": (plus - minus) / (2 * bump),
+                "dollar_delta": (plus - minus) / (2 * bump) * float(market.quoted_spots[i]) * notional,
+                "dollar_delta_definition": "normalized_delta_times_quoted_spot_times_notional",
                 "method": "FD",
                 "bump_size": 0.01,
                 "bump_mode": "relative",
@@ -417,7 +420,14 @@ def bump_result(common: dict[str, Any], *, paths: int | None = None, seed: int =
     aad_deltas = base.get("aad", {}).get("deltas", [])
     for i, _name in enumerate(market.names):
         aad_value = aad_deltas[i] if i < len(aad_deltas) else fd_deltas[i]["value"]
-        deltas.append({**fd_deltas[i], "value": float(aad_value), "method": "AAD_WITH_PATHWISE_TRANSITION_FALLBACK"})
+        deltas.append(
+            {
+                **fd_deltas[i],
+                "value": float(aad_value),
+                "dollar_delta": float(aad_value) * float(market.quoted_spots[i]) * notional,
+                "method": "AAD_WITH_PATHWISE_TRANSITION_FALLBACK",
+            }
+        )
     forecast = sum(float(x["value"]) * shocks.get(x["risk_factor_id"].split(":")[1], 0.0) for x in deltas)
     taylor = {
         "actual_pnl": float(actual),

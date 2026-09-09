@@ -31,6 +31,11 @@ def test_legacy_relative_bumps_use_quoted_spots_and_crn() -> None:
     assert len(result["scenarios"]) == 5
     assert all(x["bump_mode"] == "relative" for x in result["sensitivities"])
     assert {x["legacy_data_index"] for x in result["sensitivities"]} == {0, 1}
+    assert all("dollar_delta" in x for x in result["sensitivities"])
+    equity_dollar_delta = sum(
+        x["dollar_delta"] for x in result["sensitivities"] if x["risk_factor_id"].startswith("EQ:")
+    )
+    assert equity_dollar_delta < -8000.0
 
 
 def test_compiler_exposes_all_three_legacy_legs() -> None:
