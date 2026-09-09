@@ -30,7 +30,7 @@ def test_benchmark_reports_requested_greek_scopes() -> None:
     assert result["requested_greeks"] == requested
     assert set(requested) - {"bucket_vega"} <= set(result["greeks"])
     assert set(result["bucket_vega"]) == {"1M", "3M", "6M", "1Y", "2Y"}
-    assert result["greeks"]["delta"]["method"] == "CRN_BUMP_REVALUE"
+    assert result["greeks"]["delta"]["method"] in {"AAD_FIXED_BRANCH", "AAD_FIXED_BRANCH+PATHWISE", "PATHWISE"}
     assert result["greeks"]["gamma"]["method"] == "CRN_BUMP_REVALUE"
     assert result["greeks"]["vega"]["method"] == "CRN_BUMP_REVALUE"
     assert result["bucket_vega"]["1Y"]["method"] == "CRN_BUCKET_BUMP_REVALUE"
@@ -38,6 +38,8 @@ def test_benchmark_reports_requested_greek_scopes() -> None:
     assert len(result["gamma_by_underlying"]) == 3
     assert abs(sum(result["delta_by_underlying"]) - result["greeks"]["delta"]["value"]) < 1e-12
     assert abs(sum(result["gamma_by_underlying"]) - result["greeks"]["gamma"]["value"]) < 1e-12
+    assert result["hybrid_aad"]["enabled"] is True
+    assert result["hybrid_aad"]["cached_structure_count"] > 0
 
 
 def test_benchmark_tool_accepts_100k_scope() -> None:

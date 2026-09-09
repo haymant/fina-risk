@@ -100,6 +100,8 @@ For an end-to-end portfolio P&L request, agents should follow `refs/sample-user-
 
 For layman explanations of structure reuse, correlation-factor compression, and the boundary between fixed-branch AAD, smoothed AAD, and CRN fallback, load `refs/uniqueness-factor-compression-and-aad.md`.
 
+The benchmark hybrid lane uses cached structure-level method selection: XAD `AAD_FIXED_BRANCH` for eligible stable spot-delta paths, `PATHWISE` fallback in transition bands, optional explicitly labeled `AAD_SMOOTHED`, and CRN bump/bucket fallback for unsupported gamma, volatility-surface, curve, FX, skew, and cross-factor components.
+
 ## Canonical DTO hierarchy
 
 ```text

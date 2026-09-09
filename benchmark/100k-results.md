@@ -134,3 +134,28 @@ uv run python scripts/run_100k_scope.py
 ```
 
 The benchmark output is written to `/tmp/fina-risk-100k-benchmark.json`, and the Parquet result is written to `/tmp/fina-risk-100k-olap/`. Large generated inputs and outputs are intentionally kept outside Git.
+
+
+## Hybrid AAD rerun
+
+The benchmark was rerun with `hybrid_aad=true` and cached structure-level method selection. The delta path uses the XAD fixed-branch adapter for stable paths and reserves pathwise fallback for paths inside the exercise/barrier transition band. The method decision is cached per payoff structure, so 100,000 instruments reuse 1,000 hybrid evaluations.
+
+| Hybrid metric | Result |
+|---|---:|
+| Calculation time | 68.14 seconds |
+| Parquet persistence | 2.81 seconds |
+| Total workflow | 71.02 seconds |
+| Calculation throughput | 1,468 instruments/second |
+| Cached hybrid structures | 1,000 |
+| Delta method count | 100,000 `AAD_FIXED_BRANCH` instrument uses |
+| Gamma method | `CRN_BUMP_REVALUE` |
+| Vega method | `CRN_BUMP_REVALUE` |
+| Bucket vega method | `CRN_BUCKET_BUMP_REVALUE` |
+| IRPV01 method | `CRN_BUMP_REVALUE` |
+| FX delta method | `CRN_BUMP_REVALUE` |
+| Skew delta method | `CRN_BUMP_REVALUE` |
+| Cross vega method | `CRN_BUMP_REVALUE` |
+
+The 100k benchmark paths did not fall inside the configured transition band for the generated structures, so the measured delta lane used fixed-branch AAD throughout. The implementation still retains the pathwise fallback and reports the transition fraction when a portfolio contains paths near a kink or barrier.
+
+This result should not be interpreted as full-product AAD. The current hybrid lane provides actual XAD fixed-branch first-order spot delta. Other Greeks remain CRN-based until their model inputs and payoff/state arithmetic are included in a differentiable tape. Smoothed AAD is available as an explicit opt-in method through `smoothing_enabled` and `smoothing_width`; it is labeled as an approximation rather than exact hard-barrier AAD.

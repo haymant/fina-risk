@@ -5,6 +5,7 @@ from typing import Any
 
 import numpy as np
 
+from .hybrid import hybrid_delta
 from .pricing import price_terminal_legs
 
 
@@ -63,6 +64,11 @@ def run_benchmark(
     bucket_vega_checksums = {bucket: 0.0 for bucket in ("1M", "3M", "6M", "1Y", "2Y")}
     pnl_checksum = 0.0
     risk_rows: list[dict[str, Any]] = []
+    hybrid_enabled = bool(execution.get("hybrid_aad", True))
+    smoothing_enabled = bool(execution.get("smoothing_enabled", False))
+    smoothing_width = float(execution.get("smoothing_width", 0.01))
+    hybrid_cache: dict[tuple[int, float], dict[str, Any]] = {}
+    hybrid_method_counts: dict[str, int] = {}
     for start in range(0, instruments, 1000):
         count = min(1000, instruments - start)
         for local in range(count):
@@ -109,6 +115,24 @@ def run_benchmark(
                     ) ** 2
                 delta_value = float(delta_values.sum())
                 gamma_value = float(gamma_values.sum())
+                if hybrid_enabled:
+                    hybrid_key = (int(key), float(strikes[key]))
+                    hybrid = hybrid_cache.get(hybrid_key)
+                    if hybrid is None:
+                        hybrid = hybrid_delta(
+                            terminal[:, idx],
+                            spots[idx],
+                            spots[idx],
+                            float(strikes[key]),
+                            1.0,
+                            smoothing_width=smoothing_width,
+                            smoothing_enabled=smoothing_enabled,
+                        )
+                        hybrid_cache[hybrid_key] = hybrid
+                    delta_values = np.asarray(hybrid["value"], dtype=np.float64)
+                    delta_value = float(delta_values.sum())
+                    hybrid_method = str(hybrid["method"])
+                    hybrid_method_counts[hybrid_method] = hybrid_method_counts.get(hybrid_method, 0) + 1
                 delta_by_underlying += delta_values
                 gamma_by_underlying += gamma_values
                 log_returns = np.log(np.maximum(terminal[:, idx] / spots[idx][None, :], 1e-12))
@@ -245,9 +269,17 @@ def run_benchmark(
             "greeks": {
                 name: {
                     "value": greek_checksums[name],
-                    "method": "CRN_BUMP_REVALUE",
-                    "coverage": "portfolio_instrument_bump",
-                    "aad_eligible": False,
+                    "method": (
+                        max(hybrid_method_counts, key=lambda method: hybrid_method_counts[method])
+                        if name == "delta" and hybrid_enabled and hybrid_method_counts
+                        else "CRN_BUMP_REVALUE"
+                    ),
+                    "coverage": (
+                        "portfolio_structure_hybrid"
+                        if name == "delta" and hybrid_enabled
+                        else "portfolio_instrument_bump"
+                    ),
+                    "aad_eligible": bool(name == "delta" and hybrid_enabled),
                 }
                 for name in greeks
                 if name != "bucket_vega"
@@ -264,6 +296,14 @@ def run_benchmark(
             "aad_mode": "representative fixed-branch arithmetic; portfolio transition fallback explicit"
             if sensitivities != "none"
             else None,
+            "hybrid_aad": {
+                "enabled": hybrid_enabled,
+                "smoothing_enabled": smoothing_enabled,
+                "smoothing_width": smoothing_width if smoothing_enabled else None,
+                "method_counts": hybrid_method_counts,
+                "cached_structure_count": len(hybrid_cache),
+                "delta_method_policy": "AAD_FIXED_BRANCH on stable paths; PATHWISE fallback on transition paths",
+            },
             "risk_rows": risk_rows if emit_rows else None,
         }
     }
