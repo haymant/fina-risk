@@ -107,17 +107,79 @@ RiskResult price_fixture(const std::string& request_json, std::size_t paths, std
             quoted[i] = get_number(equities[i], "spot", refs[i]);
     }
     const double strike = deal.value("knockInStar", json::object()).value("strikeKI2", 0.78);
+    const int evaluation_date = request.at("marketData").value("evaluationDate", 0);
+    const int expiry_date = deal.value("expiryDate", deal.value("maturityDate", evaluation_date));
+    const double time = std::max(expiry_date - evaluation_date, 0) / 365.0;
+    const double rate = request.at("marketData").value("discCurves", json::array()).empty()
+        ? 0.0 : request.at("marketData").at("discCurves").at(0).value("curve", json::array()).empty()
+            ? 0.0 : request.at("marketData").at("discCurves").at(0).at("curve").at(0).value("rate", 0.0);
+    const double discount_factor = std::exp(-rate * time);
+    std::vector<double> vols(refs.size(), 0.45);
+    if (request.at("marketData").contains("eqVol")) {
+        for (std::size_t i = 0; i < refs.size(); ++i) {
+            for (const auto& surface : request.at("marketData").at("eqVol")) {
+                if (surface.value("_id", "") != request.at("marketData").at("equity").at(i).value("_id", "")) continue;
+                const auto values = surface.value("vol", json::array());
+                const auto strikes = surface.value("strike", json::array());
+                const auto maturities = surface.value("maturity", json::array());
+                std::size_t col = 0;
+                double best_strike_distance = 1.0e300;
+                for (std::size_t k = 0; k < strikes.size(); ++k) {
+                    const double distance = std::abs(strikes.at(k).get<double>() - quoted[i]);
+                    if (distance < best_strike_distance) { best_strike_distance = distance; col = k; }
+                }
+                std::size_t row = 0;
+                double best_maturity_distance = 1.0e300;
+                const double target_maturity = evaluation_date + 0.40 * 365.0;
+                for (std::size_t k = 0; k < maturities.size(); ++k) {
+                    const double distance = std::abs(maturities.at(k).get<double>() - target_maturity);
+                    if (distance < best_maturity_distance) { best_maturity_distance = distance; row = k; }
+                }
+                if (!values.empty() && values.at(row).is_array()) vols[i] = values.at(row).at(std::min(col, values.at(row).size() - 1)).get<double>() / 100.0;
+                break;
+            }
+        }
+    }
+    double correlation = 0.0;
+    try { correlation = request.at("marketData").at("corr").at(0).at("correlation").at(0).value("correlation", 0.0); }
+    catch (...) { correlation = 0.0; }
     std::mt19937_64 rng(seed);
     std::normal_distribution<double> normal(0.0, 1.0);
     double put = 0.0;
+    const int steps = std::max(2, std::min(194, static_cast<int>(std::round(time * 252.0))));
+    const double dt = time / steps;
+    const double orthogonal_scale = std::sqrt(std::max(1.0 - correlation * correlation, 0.0));
     for (std::size_t p = 0; p < paths; ++p) {
+        std::vector<double> log_spot(quoted.size());
+        for (std::size_t i = 0; i < quoted.size(); ++i) log_spot[i] = std::log(quoted[i]);
+        for (int step = 0; step < steps; ++step) {
+            const double z1 = normal(rng);
+            const double z2 = correlation * z1 + orthogonal_scale * normal(rng);
+            if (!log_spot.empty()) log_spot[0] += (rate - 0.5 * vols[0] * vols[0]) * dt + vols[0] * std::sqrt(dt) * z1;
+            if (log_spot.size() > 1) log_spot[1] += (rate - 0.5 * vols[1] * vols[1]) * dt + vols[1] * std::sqrt(dt) * z2;
+        }
         double worst = 10.0;
-        for (std::size_t i = 0; i < refs.size(); ++i)
-            worst = std::min(worst, std::exp(0.20 * normal(rng)) * quoted[i] / refs[i]);
+        for (std::size_t i = 0; i < refs.size(); ++i) worst = std::min(worst, std::exp(log_spot[i]) / refs[i]);
         put += std::max(strike - worst, 0.0);
     }
-    put /= static_cast<double>(paths);
-    return {1.0 - put, put, {{"PUT", -1, -put}, {"FUNDING", 1, 1.0}, {"COUPON", 1, 0.0}}};
+    put = discount_factor * put / static_cast<double>(paths);
+    double coupon = 0.0;
+    const auto& rg = deal.value("RGACCLKO", json::object());
+    const auto ends = rg.value("endDate", json::array());
+    const auto payments = rg.value("paymentDate", json::array());
+    const auto rates = rg.value("accruRate", json::array());
+    const auto paid = rg.value("N1", json::array());
+    const auto total = rg.value("N2", json::array());
+    const double notional = deal.value("notional", 1.0);
+    for (std::size_t i = 0; i < ends.size() && i < payments.size() && i < rates.size() && i < paid.size() && i < total.size(); ++i) {
+        const int unpaid = std::max(total.at(i).get<int>() - paid.at(i).get<int>(), 0);
+        const int fixings = std::max(total.at(i).get<int>(), 1);
+        coupon += 10.0 * rates.at(i).get<double>() * static_cast<double>(unpaid) / fixings
+            * std::exp(-rate * std::max(payments.at(i).get<int>() - evaluation_date, 0) / 365.0);
+    }
+    const double funding = discount_factor;
+    const double pv = funding - put + coupon;
+    return {pv, put, {{"PUT", -1, -put}, {"FUNDING", 1, funding}, {"COUPON", 1, coupon}}};
 }
 
 BenchmarkResult run_benchmark(const std::string& instruments_json,
