@@ -79,8 +79,9 @@ def run_benchmark(
             "pv_checksum": pv_checksum,
             "sensitivity_checksum": delta_checksum if sensitivities != "none" else None,
             "taylor_pnl_checksum": pnl_checksum if pnl != "none" else None,
-            "aad_engine": "QuantLib-Risks/XAD" if sensitivities != "none" else None,
-            "aad_mode": "fixed-branch representative arithmetic; transition fallback explicit"
+            "sensitivity_engine": "PATHWISE_SHARED_KERNEL" if sensitivities != "none" else None,
+            "aad_engine": "QuantLib-Risks/XAD_representative_only" if sensitivities != "none" else None,
+            "aad_mode": "representative fixed-branch arithmetic; portfolio transition fallback explicit"
             if sensitivities != "none"
             else None,
         }
