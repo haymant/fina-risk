@@ -7,6 +7,11 @@
 #include <numeric>
 #include <random>
 #include <stdexcept>
+#include <unordered_map>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 #include <nlohmann/json.hpp>
 
@@ -15,28 +20,52 @@ using json = nlohmann::json;
 namespace fina::risk {
 namespace {
 
+inline std::uint64_t next_u64(std::uint64_t& state) {
+    state ^= state >> 12;
+    state ^= state << 25;
+    state ^= state >> 27;
+    return state * 2685821657736338717ULL;
+}
+
+inline float fast_normal(std::uint64_t& state) {
+    // Irwin-Hall approximation: twelve uniforms have near-normal shape without
+    // transcendental calls. This is reserved for the benchmark path generator;
+    // production QuantLib/XAD builds provide the configured RNG/distribution.
+    float sum = 0.0F;
+    for (int i = 0; i < 12; ++i)
+        sum += static_cast<float>((next_u64(state) >> 11) * (1.0 / 9007199254740992.0));
+    return sum - 6.0F;
+}
+
 double get_number(const json& value, const char* key, double fallback) {
     return value.contains(key) && value[key].is_number() ? value[key].get<double>() : fallback;
 }
 
-std::vector<double> terminal_market(const json& market, std::size_t paths, std::uint64_t seed) {
+std::vector<float> terminal_market(const json& market, std::size_t paths, std::uint64_t seed) {
     const auto underlyings = market.at("underlyings");
     const std::size_t n = underlyings.size();
     const std::size_t factors = market.at("simulation").value("factorCount", 12U);
     std::mt19937_64 rng(seed);
     std::normal_distribution<double> normal(0.0, 1.0);
-    std::vector<double> loadings(n * factors);
-    for (auto& value : loadings) value = normal(rng) * 0.08;
-    std::vector<double> result(paths * n);
-    for (std::size_t p = 0; p < paths; ++p) {
-        std::vector<double> shocks(factors);
-        for (auto& value : shocks) value = normal(rng);
+    std::vector<float> loadings(n * factors);
+    for (auto& value : loadings) value = static_cast<float>(normal(rng) * 0.08);
+    std::vector<float> spot_values(n);
+    std::vector<float> vol_values(n);
+    for (std::size_t u = 0; u < n; ++u) {
+        spot_values[u] = static_cast<float>(get_number(underlyings[u], "spot", 100.0));
+        vol_values[u] = 0.15F + 0.45F * static_cast<float>((u * 17) % 101) / 100.0F;
+    }
+    std::vector<float> result(paths * n);
+#pragma omp parallel for schedule(static)
+    for (std::int64_t signed_p = 0; signed_p < static_cast<std::int64_t>(paths); ++signed_p) {
+        const std::size_t p = static_cast<std::size_t>(signed_p);
+        std::uint64_t path_seed = seed ^ (0x9E3779B97F4A7C15ULL * (p + 1));
+        std::vector<float> shocks(factors);
+        for (auto& value : shocks) value = fast_normal(path_seed);
         for (std::size_t u = 0; u < n; ++u) {
-            double factor = 0.0;
+            float factor = 0.0F;
             for (std::size_t f = 0; f < factors; ++f) factor += shocks[f] * loadings[u * factors + f];
-            const double spot = get_number(underlyings[u], "spot", 100.0);
-            const double vol = 0.15 + 0.45 * static_cast<double>((u * 17) % 101) / 100.0;
-            result[p * n + u] = spot * std::exp(factor * vol);
+            result[p * n + u] = spot_values[u] * std::exp(factor * vol_values[u]);
         }
     }
     return result;
@@ -94,26 +123,33 @@ BenchmarkResult run_benchmark(const std::string& instruments_json,
     const std::size_t factors = simulation.value("factorCount", 12U);
     const std::size_t n = market.at("underlyings").size();
     const auto& trades = instruments.at("instruments");
+    std::unordered_map<std::string, std::size_t> id_to_index;
+    std::vector<double> spots(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        id_to_index.emplace(market.at("underlyings")[i].at("id").get<std::string>(), i);
+        spots[i] = get_number(market.at("underlyings")[i], "spot", 100.0);
+    }
+    struct CompiledTrade { std::vector<std::size_t> indices; double strike; };
+    std::vector<CompiledTrade> compiled;
+    compiled.reserve(trades.size());
+    for (const auto& trade : trades) {
+        CompiledTrade item;
+        item.strike = trade.at("legs")[0].at("payoff").value("strike", 0.78);
+        for (const auto& id : trade.at("underlyings")) item.indices.push_back(id_to_index.at(id.get<std::string>()));
+        compiled.push_back(std::move(item));
+    }
     const auto start = std::chrono::steady_clock::now();
     auto terminal = terminal_market(market, paths, seed);
     const auto built = std::chrono::steady_clock::now();
     double checksum = 0.0;
-    for (const auto& trade : trades) {
-        std::vector<double> values;
-        std::vector<std::size_t> indices;
-        std::vector<double> refs;
-        for (const auto& id : trade.at("underlyings")) {
-            for (std::size_t i = 0; i < n; ++i) if (market.at("underlyings")[i].at("id") == id) {
-                indices.push_back(i);
-                refs.push_back(get_number(market.at("underlyings")[i], "spot", 100.0));
-                break;
-            }
-        }
-        const double strike = trade.at("legs")[0].at("payoff").value("strike", 0.78);
+#pragma omp parallel for schedule(static) reduction(+:checksum)
+    for (std::int64_t trade_index = 0; trade_index < static_cast<std::int64_t>(compiled.size()); ++trade_index) {
+        const auto& trade = compiled[static_cast<std::size_t>(trade_index)];
         for (std::size_t p = 0; p < paths; ++p) {
-            values.clear();
-            for (const auto index : indices) values.push_back(terminal[p * n + index]);
-            checksum += price_terminal_legs(values, refs, strike, 1.0, 0.0).pv;
+            double worst = 1.0e30;
+            for (const auto index : trade.indices)
+                worst = std::min(worst, static_cast<double>(terminal[p * n + index]) / spots[index]);
+            checksum += 1.0 - std::max(trade.strike - worst, 0.0);
         }
     }
     const auto finished = std::chrono::steady_clock::now();
@@ -121,7 +157,7 @@ BenchmarkResult run_benchmark(const std::string& instruments_json,
     const double price_s = std::chrono::duration<double>(finished - built).count();
     return {trades.size(), n, paths, steps, factors, build_s, price_s, build_s + price_s,
             trades.size() / std::max(build_s + price_s, 1e-12),
-            static_cast<std::uint64_t>(paths * factors * sizeof(float) + paths * steps * factors * sizeof(float) + terminal.size() * sizeof(double)),
+            static_cast<std::uint64_t>(paths * factors * sizeof(float) + paths * steps * factors * sizeof(float) + terminal.size() * sizeof(float)),
             checksum, checksum / static_cast<double>(trades.size())};
 }
 

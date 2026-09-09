@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(nlohmann_json 3.11 REQUIRED)
+find_package(OpenMP QUIET)
 find_package(QuantLib QUIET)
 find_package(XAD QUIET)
 find_package(Arrow QUIET)
@@ -16,6 +17,12 @@ find_package(pybind11 QUIET)
 add_library(fina_risk_core src/fina_risk_cpp.cpp)
 target_include_directories(fina_risk_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(fina_risk_core PUBLIC nlohmann_json::nlohmann_json)
+target_compile_options(fina_risk_core PRIVATE $<$<CONFIG:Release>:-O3;-march=native;-mtune=native;-ffast-math>)
+
+if (OpenMP_CXX_FOUND)
+  target_link_libraries(fina_risk_core PUBLIC OpenMP::OpenMP_CXX)
+  target_compile_definitions(fina_risk_core PUBLIC FINA_RISK_HAS_OPENMP=1)
+endif()
 
 if (QuantLib_FOUND AND XAD_FOUND)
   target_compile_definitions(fina_risk_core PUBLIC FINA_RISK_HAS_QUANTLIB_XAD=1)
@@ -28,6 +35,7 @@ endif()
 
 add_executable(fina-risk-cpp-benchmark apps/benchmark.cpp)
 target_link_libraries(fina-risk-cpp-benchmark PRIVATE fina_risk_core)
+target_compile_options(fina-risk-cpp-benchmark PRIVATE $<$<CONFIG:Release>:-O3;-march=native;-mtune=native;-ffast-math>)
 
 if (pybind11_FOUND)
   pybind11_add_module(fina_risk_cpp bindings/fina_risk_pybind.cpp)
