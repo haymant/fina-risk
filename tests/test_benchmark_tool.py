@@ -32,8 +32,11 @@ def test_benchmark_reports_requested_greek_scopes() -> None:
     assert set(result["bucket_vega"]) == {"1M", "3M", "6M", "1Y", "2Y"}
     assert result["greeks"]["delta"]["method"] in {"AAD_FIXED_BRANCH", "AAD_FIXED_BRANCH+PATHWISE", "PATHWISE"}
     assert result["greeks"]["gamma"]["method"] == "CRN_BUMP_REVALUE"
-    assert result["greeks"]["vega"]["method"] == "CRN_BUMP_REVALUE"
-    assert result["bucket_vega"]["1Y"]["method"] == "CRN_BUCKET_BUMP_REVALUE"
+    assert result["greeks"]["vega"]["method"] == "AAD_FIXED_BRANCH"
+    assert result["greeks"]["irpv01"]["method"] == "AAD_FIXED_BRANCH"
+    assert result["greeks"]["fx_delta"]["method"] == "AAD_FIXED_BRANCH"
+    assert result["greeks"]["skew_delta"]["method"] == "AAD_FIXED_BRANCH"
+    assert result["bucket_vega"]["1Y"]["method"] == "AAD_FIXED_BRANCH"
     assert len(result["delta_by_underlying"]) == 3
     assert len(result["gamma_by_underlying"]) == 3
     assert abs(sum(result["delta_by_underlying"]) - result["greeks"]["delta"]["value"]) < 1e-12

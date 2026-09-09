@@ -159,3 +159,23 @@ The benchmark was rerun with `hybrid_aad=true` and cached structure-level method
 The 100k benchmark paths did not fall inside the configured transition band for the generated structures, so the measured delta lane used fixed-branch AAD throughout. The implementation still retains the pathwise fallback and reports the transition fraction when a portfolio contains paths near a kink or barrier.
 
 This result should not be interpreted as full-product AAD. The current hybrid lane provides actual XAD fixed-branch first-order spot delta. Other Greeks remain CRN-based until their model inputs and payoff/state arithmetic are included in a differentiable tape. Smoothed AAD is available as an explicit opt-in method through `smoothing_enabled` and `smoothing_width`; it is labeled as an approximation rather than exact hard-barrier AAD.
+
+
+## Expanded market-input AAD rerun
+
+The fixed-branch XAD tape was extended to local first-order derivatives for volatility scale, discount factor, FX conversion, and skew parameter. These derivatives are cached per payoff structure and used for the 100k run.
+
+| Risk | Resulting method | Coverage |
+|---|---|---|
+| Delta | `AAD_FIXED_BRANCH` | 100,000 instrument uses; hybrid transition fallback retained |
+| Vega | `AAD_FIXED_BRANCH` | 100,000 instrument uses |
+| Bucket vega | `AAD_FIXED_BRANCH` | Derived from taped vega and bucket weights |
+| IRPV01 | `AAD_FIXED_BRANCH` | 100,000 instrument uses |
+| FX delta | `AAD_FIXED_BRANCH` | 100,000 instrument uses |
+| Skew delta | `AAD_FIXED_BRANCH` | 100,000 instrument uses |
+| Gamma | `CRN_BUMP_REVALUE` | Requires second-order or nested AAD |
+| Cross vega | `CRN_BUMP_REVALUE` | Requires a mixed-factor tape |
+
+The expanded run completed in **63.36 seconds** for calculation, **3.00 seconds** for Parquet persistence, and **66.43 seconds** end to end. It persisted 300,000 atomic risk rows at approximately 1,578 instruments per second.
+
+The XAD market tape uses a local tangent representation around the base volatility and skew inputs while freezing path random numbers and payoff branch membership. These are valid fixed-branch local sensitivities. They are not full transition-risk derivatives for hard barriers, memory states, or physical-delivery changes. Gamma and cross-vega remain explicitly CRN-based because the project does not yet have second-order/nested or mixed-factor tapes.

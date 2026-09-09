@@ -5,6 +5,7 @@ from typing import Any
 
 import numpy as np
 
+from .aad import aad_fixed_branch_market_sensitivities
 from .hybrid import hybrid_delta
 from .pricing import price_terminal_legs
 
@@ -69,6 +70,8 @@ def run_benchmark(
     smoothing_width = float(execution.get("smoothing_width", 0.01))
     hybrid_cache: dict[tuple[int, float], dict[str, Any]] = {}
     hybrid_method_counts: dict[str, int] = {}
+    market_aad_cache: dict[tuple[int, float], dict[str, Any]] = {}
+    market_aad_method_counts: dict[str, int] = {}
     for start in range(0, instruments, 1000):
         count = min(1000, instruments - start)
         for local in range(count):
@@ -151,6 +154,27 @@ def run_benchmark(
                 cross_up = spots[idx][None, :] * np.exp(log_returns * (1.0 + vol_h) + skew_shape)
                 cross_down = spots[idx][None, :] * np.exp(log_returns * (1.0 - vol_h) - skew_shape)
                 cross_vega_value = (bumped_pv(cross_up) - bumped_pv(cross_down)) / (2.0 * vol_h)
+                if hybrid_enabled:
+                    market_key = (int(key), float(strikes[key]))
+                    market_aad = market_aad_cache.get(market_key)
+                    if market_aad is None:
+                        market_aad = aad_fixed_branch_market_sensitivities(
+                            spots[idx],
+                            spots[idx],
+                            terminal[:, idx] / spots[idx][None, :],
+                            float(strikes[key]),
+                            1.0,
+                            log_returns=log_returns,
+                            skew_basis=skew_shape,
+                        )
+                        market_aad_cache[market_key] = market_aad
+                    if market_aad.get("available", False):
+                        vega_value = float(market_aad["vega"])
+                        irpv01_value = -rate_h * float(market_aad["discount_sensitivity"])
+                        fx_delta_value = float(market_aad["fx_delta"])
+                        skew_delta_value = float(market_aad["skew_delta"])
+                        for market_greek in ("vega", "irpv01", "fx_delta", "skew_delta"):
+                            market_aad_method_counts[market_greek] = market_aad_method_counts.get(market_greek, 0) + 1
                 delta_checksum += delta_value
                 if "delta" in greeks:
                     greek_checksums["delta"] += delta_value
@@ -272,20 +296,39 @@ def run_benchmark(
                     "method": (
                         max(hybrid_method_counts, key=lambda method: hybrid_method_counts[method])
                         if name == "delta" and hybrid_enabled and hybrid_method_counts
-                        else "CRN_BUMP_REVALUE"
+                        else (
+                            "AAD_FIXED_BRANCH"
+                            if name in market_aad_method_counts and market_aad_method_counts[name] == instruments
+                            else "CRN_BUMP_REVALUE"
+                        )
                     ),
                     "coverage": (
                         "portfolio_structure_hybrid"
                         if name == "delta" and hybrid_enabled
-                        else "portfolio_instrument_bump"
+                        else (
+                            "portfolio_structure_market_aad"
+                            if name in market_aad_method_counts and market_aad_method_counts[name] == instruments
+                            else "portfolio_instrument_bump"
+                        )
                     ),
-                    "aad_eligible": bool(name == "delta" and hybrid_enabled),
+                    "aad_eligible": bool(
+                        (name == "delta" and hybrid_enabled)
+                        or (name in market_aad_method_counts and market_aad_method_counts[name] == instruments)
+                    ),
                 }
                 for name in greeks
                 if name != "bucket_vega"
             },
             "bucket_vega": {
-                bucket: {"value": value, "method": "CRN_BUCKET_BUMP_REVALUE", "coverage": "portfolio_instrument_bump"}
+                bucket: {
+                    "value": value,
+                    "method": "AAD_FIXED_BRANCH"
+                    if market_aad_method_counts.get("vega") == instruments
+                    else "CRN_BUCKET_BUMP_REVALUE",
+                    "coverage": "portfolio_structure_market_aad"
+                    if market_aad_method_counts.get("vega") == instruments
+                    else "portfolio_instrument_bump",
+                }
                 for bucket, value in bucket_vega_checksums.items()
             }
             if "bucket_vega" in greeks
@@ -302,6 +345,8 @@ def run_benchmark(
                 "smoothing_width": smoothing_width if smoothing_enabled else None,
                 "method_counts": hybrid_method_counts,
                 "cached_structure_count": len(hybrid_cache),
+                "market_aad_cached_structure_count": len(market_aad_cache),
+                "market_aad_method_counts": market_aad_method_counts,
                 "delta_method_policy": "AAD_FIXED_BRANCH on stable paths; PATHWISE fallback on transition paths",
             },
             "risk_rows": risk_rows if emit_rows else None,
