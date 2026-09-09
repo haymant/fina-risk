@@ -53,18 +53,20 @@ Coordinator ── Market Engine · Universe Engine · Simulation Engine
 
 | Target | Runtime | State |
 |---|---|---|
-| Local | Long-running process; Rust MCP server (`stdio` / `http-stream`) | HOT in-memory caches: curve, vol, path cube, state cube, AAD tape |
+| Local | Long-running Python MCP server with a native C++ pricing library (`stdio` / `http-stream`) | HOT in-memory caches: curve, vol, path cube, state cube, AAD tape |
 | Vercel | Stateless serverless ASGI/Streamable HTTP endpoint (see fina-pricer) | WARM = Redis; COLD = GCS Parquet |
 
 **Vercel host setup follows `fina-pricer/`** (`api/index.py` + `vercel.json` rewriting `/mcp` → `/api`, entrypoint `api.index:app`). Warm recoverable metadata (universe cache, path/state/risk cube metadata, job status, graph cache) lives in **Redis**; large immutable artifacts (path cubes, risk cubes, PnL) live in compressed **Parquet on GCS** via DuckDB S3 interoperability. Configure `ALLOWED_HOSTS`, `S3_API_KEY`, `S3_API_SECRET`, `S3_BUCKET_NAME` (`s3://fina-riskcube`), `S3_ENDPOINT` (`storage.googleapis.com`) as deployment environment variables, never in source. For serverless latency keep path/step counts conservative; a separate long-running worker handles large production portfolios.
 
-## AAD dependencies (from fina-pricer)
+## Native C++ pricing and risk stack
 
-Reuse the fina-pricer AAD stack rather than relying on the ordinary `QuantLib` wheel:
+The `cpp/` implementation is the performance lane and deliberately owns no MCP transport. The Python MCP server and DTOs remain the compatibility boundary; Python calls the native library through pybind11 in the same style as the DuckDB Python wrapper.
 
-1. `quantlib_risks_xad` — PyPI `QuantLib-Risks` + `xad.adj_1st.Tape`, reverse-mode AAD for smooth QuantLib paths; primary Python backend.
-2. `xad_quantlib` — native C++ XAD/QuantLibAAD build exposed through a narrow bridge (pybind11/subprocess), for features missing from the Python package.
-3. `finite_difference` — allowed only for discontinuous barrier/KI/KO/autocall/memory transitions; report the method per cell and never mislabel FD as AAD. `parameters.smooth_barrier=true` is a sigmoid-smoothed **AAD approximation**, label it with smoothing width and convention.
+1. **QuantLib C++** supplies calendars, curves, volatility surfaces, processes, schedules, payoffs, instruments, and model conventions.
+2. **XAD C++** supplies reverse-mode tapes for smooth fixed-branch valuation and Greeks. Discontinuous barrier, KI/KO, worst-of, and memory transitions retain explicit pathwise/CRN fallback labels.
+3. **DuckDB + Arrow + Parquet + the official AWS S3 SDK** provide OLAP and immutable COLD persistence. Redis remains the WARM metadata adapter for the Python MCP deployment.
+4. **pybind11** exposes typed pricing, risk, P&L, and persistence functions to Python. It does not expose MCP tools; the Python server continues to share the exact tool names and schemas.
+5. The CMake build treats these libraries as optional for local bootstrap and Vercel packaging. When present, `FINA_RISK_HAS_QUANTLIB_XAD` and `FINA_RISK_HAS_DUCKDB` select the production adapters; the deterministic native reference kernel remains available without them.
 
 Never call `QuantLib.Option.delta()` or an FD loop "AAD". Background: `fina-pricer/docs/aad_research.md` and `fina-pricer/skills/fina-pricer/references/xad_quantlib_notes.md`.
 
@@ -198,6 +200,20 @@ uv run --project /path/to/fina-pricer mypy src
 - **Explainability**: report model, path/step counts, seed, moneyness, time to expiry, barrier events/hit probability, applied fixings, and coupon-memory carry, matching fina-pricer's `explainability` object.
 
 Use the fina-pricer demo for a broader matrix (OTM/ATM/ITM, memory on/off, global/local KI/KO): `fina-pricer/skills/fina-pricer/scripts/demo.py`.
+
+## C++ parity lane
+
+`cpp/include/fina_risk_cpp.hpp` defines the non-MCP native boundary. `cpp/src/fina_risk_cpp.cpp` currently implements the deterministic fixture and shared-factor benchmark kernel, with the same signed PUT/FUNDING/COUPON decomposition and benchmark fields as Python. The next production adapters must preserve these DTOs while replacing the fallback internals with QuantLib/XAD and Arrow/DuckDB/S3.
+
+Run the native lane locally:
+
+```bash
+cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release
+cmake --build cpp/build -j2
+./cpp/build/fina-risk-cpp-benchmark benchmark/instruments.json benchmark/market.json
+```
+
+The MCP layer remains Python on both local and Vercel. Vercel runs the Python fixture/HTTP regression suite; native C++ benchmarking runs in CI or a Linux build image because Vercel Python functions are not a suitable home for QuantLib/XAD toolchains.
 
 ## fina-trade integration (draft)
 

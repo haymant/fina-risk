@@ -31,10 +31,27 @@ uv run ruff check .
 uv run mypy src
 ```
 
-The local reference path uses NumPy-batched correlated GBM and shared random
-numbers for spot bumps. It is intentionally the correctness baseline for a
-future QuantLib/XAD or GPU adapter; Vercel storage and GPU execution remain
-lower-priority adapters over the same DTOs.
+The local Python reference path uses NumPy-batched correlated GBM and shared
+random numbers for spot bumps. The `cpp/` branch adds a native non-MCP lane
+with the same DTO semantics, optional QuantLib C++/XAD C++ adapters, pybind11
+interop, and DuckDB/Arrow/Parquet/AWS S3 persistence boundaries. The Python
+MCP server remains the shared tool surface locally and on Vercel.
+
+## C++ performance lane
+
+Build the native benchmark with CMake. QuantLib, XAD, DuckDB, Arrow, AWS S3,
+and pybind11 are detected when installed; the deterministic native reference
+kernel keeps the branch buildable before those production libraries are provisioned.
+
+```bash
+cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release
+cmake --build cpp/build -j2
+./cpp/build/fina-risk-cpp-benchmark benchmark/instruments.json benchmark/market.json
+```
+
+The branch intentionally does not duplicate MCP tools in C++. The Python MCP
+server calls the C++ library through pybind11, preserving existing tool names
+and schemas while allowing native pricing/risk and OLAP execution.
 
 ## Benchmark corpus
 
