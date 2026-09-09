@@ -205,6 +205,15 @@ Use the fina-pricer demo for a broader matrix (OTM/ATM/ITM, memory on/off, globa
 
 `cpp/include/fina_risk_cpp.hpp` defines the non-MCP native boundary. `cpp/src/fina_risk_cpp.cpp` currently implements the deterministic fixture and shared-factor benchmark kernel, with the same signed PUT/FUNDING/COUPON decomposition and benchmark fields as Python. The next production adapters must preserve these DTOs while replacing the fallback internals with QuantLib/XAD and Arrow/DuckDB/S3.
 
+The native `fina-risk-cpp-e2e` target follows `refs/sample-user-journey.md` from
+instrument/market ingestion through structure compilation, shared paths, hybrid
+risk rows, Parquet materialization, and DuckDB aggregation. Method provenance is
+honest: without discoverable QuantLib C++ and XAD C++ libraries it emits
+`PATHWISE_NATIVE_FALLBACK`; with both adapters it selects `AAD_FIXED_BRANCH` for
+smooth fixed-branch factors and retains pathwise/CRN fallback for transitions.
+The 100k-record benchmark uses 1,000 paths when requested and reports ingestion,
+compile, path, risk, serialization, and OLAP timings separately.
+
 Run the native lane locally:
 
 ```bash

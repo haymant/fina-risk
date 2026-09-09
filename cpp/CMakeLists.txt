@@ -37,10 +37,17 @@ add_executable(fina-risk-cpp-benchmark apps/benchmark.cpp)
 target_link_libraries(fina-risk-cpp-benchmark PRIVATE fina_risk_core)
 target_compile_options(fina-risk-cpp-benchmark PRIVATE $<$<CONFIG:Release>:-O3;-march=native;-mtune=native;-ffast-math>)
 
+add_executable(fina-risk-cpp-e2e apps/e2e_benchmark.cpp)
+target_link_libraries(fina-risk-cpp-e2e PRIVATE fina_risk_core)
+if (OpenMP_CXX_FOUND)
+  target_link_libraries(fina-risk-cpp-e2e PRIVATE OpenMP::OpenMP_CXX)
+endif()
+target_compile_options(fina-risk-cpp-e2e PRIVATE $<$<CONFIG:Release>:-O3;-march=native;-mtune=native;-ffast-math>)
+
 if (pybind11_FOUND)
   pybind11_add_module(fina_risk_cpp bindings/fina_risk_pybind.cpp)
   target_compile_definitions(fina_risk_cpp PRIVATE FINA_RISK_HAS_PYBIND11=1)
   target_link_libraries(fina_risk_cpp PRIVATE fina_risk_core)
 endif()
 
-install(TARGETS fina-risk-cpp-benchmark RUNTIME DESTINATION bin)
+install(TARGETS fina-risk-cpp-benchmark fina-risk-cpp-e2e RUNTIME DESTINATION bin)

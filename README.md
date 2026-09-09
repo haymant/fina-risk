@@ -53,6 +53,30 @@ The branch intentionally does not duplicate MCP tools in C++. The Python MCP
 server calls the C++ library through pybind11, preserving existing tool names
 and schemas while allowing native pricing/risk and OLAP execution.
 
+## E2E hybrid benchmark
+
+The native E2E target follows `skills/fina-risk/refs/sample-user-journey.md`:
+ingestion, structure compilation, shared paths, hybrid risk rows, Arrow/Parquet
+conversion, and a DuckDB OLAP query.
+
+```bash
+FINA_RISK_BENCHMARK_INSTRUMENTS=100000 \
+FINA_RISK_BENCHMARK_UNDERLYINGS=1200 \
+uv run python scripts/generate_benchmark.py
+cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release
+cmake --build cpp/build -j2
+uv run python scripts/run_cpp_e2e_olap.py \
+  benchmark/instruments.json benchmark/market.json /tmp/fina-risk-e2e \
+  --paths 1000
+```
+
+The current environment reports native method provenance honestly: when
+QuantLib C++ and XAD C++ are not discoverable, rows use
+`PATHWISE_NATIVE_FALLBACK`; when both are installed, the same target selects
+`AAD_FIXED_BRANCH` for smooth factors and explicit pathwise/CRN fallback for
+transitions. See [`benchmark/e2e-100k-1k-cpp-python.md`](benchmark/e2e-100k-1k-cpp-python.md)
+for the measured comparison.
+
 ## Benchmark corpus
 
 The benchmark generator creates 2,000 heterogeneous three-leg instruments over
