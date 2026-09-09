@@ -19,6 +19,7 @@ def run_benchmark(
     seed: int = 20260909,
     execution: dict[str, Any] | None = None,
     greeks: list[str] | None = None,
+    emit_rows: bool = False,
 ) -> dict[str, Any]:
     """Run a configurable shared-path portfolio benchmark through the pricing kernel."""
     instruments = max(1, int(instruments))
@@ -61,6 +62,7 @@ def run_benchmark(
     greek_checksums = {name: 0.0 for name in greeks}
     bucket_vega_checksums = {bucket: 0.0 for bucket in ("1M", "3M", "6M", "1Y", "2Y")}
     pnl_checksum = 0.0
+    risk_rows: list[dict[str, Any]] = []
     for start in range(0, instruments, 1000):
         count = min(1000, instruments - start)
         for local in range(count):
@@ -148,6 +150,54 @@ def run_benchmark(
                     np.maximum(float(strikes[key]) - worst * 1.01, 0.0).mean()
                     - np.maximum(float(strikes[key]) - worst, 0.0).mean()
                 )
+            if emit_rows:
+                for underlying_position, underlying_index in enumerate(idx):
+                    risk_rows.append(
+                        {
+                            "portfolio_id": "BENCHMARK",
+                            "instrument_id": f"ELI-BENCH-{start + local:05d}",
+                            "leg_id": "PUT",
+                            "risk_factor_id": f"SPOT:EQ{int(underlying_index):04d} US",
+                            "risk_factor_type": "SPOT",
+                            "underlying_id": f"EQ{int(underlying_index):04d} US",
+                            "base_pv": base_pv if sensitivities != "none" else float(kernel["valuation"]["pv"]),
+                            "spot": float(spots[underlying_index]),
+                            "spot_shock": float(spots[underlying_index]) * 0.01,
+                            "delta": float(delta_values[underlying_position]) if sensitivities != "none" else None,
+                            "delta_dollar": float(delta_values[underlying_position] * spots[underlying_index])
+                            if sensitivities != "none"
+                            else None,
+                            "delta_pnl": float(delta_values[underlying_position] * spots[underlying_index] * 0.01)
+                            if sensitivities != "none"
+                            else None,
+                            "gamma": float(gamma_values[underlying_position]) if sensitivities != "none" else None,
+                            "gamma_pnl": float(
+                                0.5 * gamma_values[underlying_position] * (spots[underlying_index] * 0.01) ** 2
+                            )
+                            if sensitivities != "none"
+                            else None,
+                            "vega": float(vega_value / 3.0) if sensitivities != "none" else None,
+                            "vega_pnl": float(vega_value / 3.0 * 0.01) if sensitivities != "none" else None,
+                            "irpv01": float(irpv01_value / 3.0) if sensitivities != "none" else None,
+                            "rate_pnl": float(irpv01_value / 3.0 * 0.0001) if sensitivities != "none" else None,
+                            "total_taylor_pnl": float(
+                                delta_values[underlying_position] * spots[underlying_index] * 0.01
+                                + 0.5 * gamma_values[underlying_position] * (spots[underlying_index] * 0.01) ** 2
+                                + vega_value / 3.0 * 0.01
+                                + irpv01_value / 3.0 * 0.0001
+                            )
+                            if sensitivities != "none"
+                            else None,
+                            "selected_method": "CRN_BUMP_REVALUE",
+                            "cross_check_method": None,
+                            "quality_flag": "benchmark_representative",
+                            "transition_treatment": "shared_kernel_transition_fallback",
+                            "risk_factor_key": (
+                                f"BENCHMARK|ELI-BENCH-{start + local:05d}|PUT|"
+                                f"SPOT:EQ{int(underlying_index):04d} US|DELTA|"
+                            ),
+                        }
+                    )
     elapsed = time.perf_counter() - started
     return {
         "benchmark": {
@@ -214,5 +264,6 @@ def run_benchmark(
             "aad_mode": "representative fixed-branch arithmetic; portfolio transition fallback explicit"
             if sensitivities != "none"
             else None,
+            "risk_rows": risk_rows if emit_rows else None,
         }
     }

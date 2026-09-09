@@ -17,6 +17,7 @@ from typing import Any
 import numpy as np
 
 from .aad import aad_put_sensitivity
+from .risk_view import build_risk_views
 
 EXCEL_EPOCH = date(1899, 12, 30)
 
@@ -445,7 +446,7 @@ def bump_result(common: dict[str, Any], *, paths: int | None = None, seed: int =
         ],
         "method": "AAD_PLUS_FD_RESIDUAL",
     }
-    return {
+    result = {
         "base": base,
         "scenarios": scenarios,
         "sensitivities": deltas,
@@ -454,3 +455,11 @@ def bump_result(common: dict[str, Any], *, paths: int | None = None, seed: int =
         "taylor_decomposition": taylor,
         "legacy_parity": {"tasks": 5, "common_random_numbers": True, "spot_bump_convention": "1% relative"},
     }
+    result["risk_representation"] = build_risk_views(
+        result,
+        portfolio_id="PORTFOLIO",
+        instrument_id=str(common.get("dealData", {}).get("instrumentName", "INSTRUMENT")),
+        leg_id="PUT",
+        notional=notional,
+    )
+    return result

@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import date, timedelta
 from pathlib import Path
 
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / "benchmark"
-N_UNDERLYINGS = 1200
-N_INSTRUMENTS = 2000
+OUT = Path(os.getenv("FINA_RISK_BENCHMARK_OUT", str(ROOT / "benchmark")))
+N_UNDERLYINGS = int(os.getenv("FINA_RISK_BENCHMARK_UNDERLYINGS", "1200"))
+N_INSTRUMENTS = int(os.getenv("FINA_RISK_BENCHMARK_INSTRUMENTS", "2000"))
 SEED = 20260909
 
 

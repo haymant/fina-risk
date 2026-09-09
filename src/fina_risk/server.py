@@ -12,7 +12,18 @@ from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import JSONResponse
 
 from .benchmarking import run_benchmark
+from .olap import link_view_state, query_ssrm, resolve_s3_uri, storage_status, write_risk_store
+from .pipeline import (
+    dashboard_metadata,
+    ingest_instruments,
+    ingest_market_data,
+    pipeline_state,
+    plan_pnl_forecast,
+    risk_metadata,
+    trigger_pnl_forecast,
+)
 from .pricing import bump_result, common_from_job, load_legacy_request, price_fixture
+from .risk_view import aggregate_risk_views
 
 TOOLS = {
     "market": [
@@ -82,6 +93,22 @@ TOOLS = {
         ("aggregate_portfolio", "Aggregate portfolio PV and sensitivities."),
         ("net_sensitivities", "Net sensitivities by risk factor."),
         ("portfolio_scenarios", "Run portfolio scenarios."),
+    ],
+    "olap": [
+        ("write_risk_store", "Persist normalized risk-factor components to Parquet."),
+        ("olap_query", "Query normalized Parquet through DuckDB using AG Grid SSRM semantics."),
+        ("storage_status", "Inspect the DuckDB/Arrow/Parquet storage layer."),
+        ("resolve_s3_dataset", "Resolve a versioned GCS/S3-compatible Parquet dataset URI."),
+        ("link_olap_views", "Create global UI-driver state for linked OLAP views."),
+    ],
+    "pipeline": [
+        ("ingest_instruments", "Normalize and append instrument records."),
+        ("ingest_market_data", "Normalize and append market records."),
+        ("read_risk_metadata", "Read risk-factor keys and decomposition storage metadata."),
+        ("read_dashboard_metadata", "Read dashboard dimensions, measures, and shared-driver metadata."),
+        ("plan_pnl_forecast", "Plan shared-resource execution and cost for a P&L forecast."),
+        ("trigger_pnl_forecast", "Run PV and sensitivities, then persist normalized risk results."),
+        ("pipeline_state", "Create or update pipeline state for stdio or Redis-backed HTTP use."),
     ],
     "scheduler": [
         ("submit_job", "Submit a local pricing job."),
@@ -162,6 +189,7 @@ def _execute(name: str, payload: dict[str, Any] | None) -> dict[str, Any]:
             "legs": result["base"]["legs"],
             "explainability": result["base"]["explainability"],
             "conventions": result["base"]["conventions"],
+            "risk_representation": result["risk_representation"],
         }
     if name == "compile_trade":
         deal = common.get("dealData", {})
@@ -210,7 +238,45 @@ def _execute(name: str, payload: dict[str, Any] | None) -> dict[str, Any]:
             "note": "GPU adapter is lower priority; DTOs are batch-ready.",
         }
     if name in {"aggregate_portfolio", "net_sensitivities", "aggregate_risk"}:
-        return {"status": "ok", "pv": 0.0, "trade_count": len(jobs), "cells": []}
+        results = [bump_result(common_from_job(job), paths=paths, seed=seed) for job in jobs]
+        aggregated = aggregate_risk_views(results)
+        return {
+            "status": "ok",
+            "pv": sum(float(x["base"]["valuation"]["pv"]) for x in results),
+            "trade_count": len(results),
+            "risk_representation": aggregated,
+            "wide": aggregated["wide"],
+            "long": aggregated["long"],
+        }
+    if name == "write_risk_store":
+        results = [bump_result(common_from_job(job), paths=paths, seed=seed) for job in jobs]
+        return write_risk_store(
+            [x["risk_representation"] for x in results],
+            root=payload.get("root", "/tmp/fina-risk-olap"),
+            metadata={"source": "pricing_and_sensitivity", "seed": seed, "paths": paths},
+        )
+    if name == "olap_query":
+        return query_ssrm(payload.get("query", payload), root=payload.get("root", "/tmp/fina-risk-olap"))
+    if name == "storage_status":
+        return storage_status(root=payload.get("root", "/tmp/fina-risk-olap"))
+    if name == "resolve_s3_dataset":
+        return {"status": "ok", "uri": resolve_s3_uri(payload)}
+    if name == "link_olap_views":
+        return link_view_state(payload)
+    if name == "ingest_instruments":
+        return ingest_instruments(payload, root=payload.get("root", "/tmp/fina-risk-olap"))
+    if name == "ingest_market_data":
+        return ingest_market_data(payload, root=payload.get("root", "/tmp/fina-risk-olap"))
+    if name == "read_risk_metadata":
+        return risk_metadata()
+    if name == "read_dashboard_metadata":
+        return dashboard_metadata()
+    if name == "plan_pnl_forecast":
+        return plan_pnl_forecast(payload)
+    if name == "trigger_pnl_forecast":
+        return trigger_pnl_forecast(payload)
+    if name == "pipeline_state":
+        return pipeline_state(payload)
     return {
         "status": "ok",
         "tool": name,

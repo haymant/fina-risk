@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fina-risk.dev/schema/pipeline-state.schema.json",
+  "title": "Fina Risk Pipeline State",
+  "type": "object",
+  "required": ["pipeline_id", "mcp_transport", "state_backend"],
+  "properties": {
+    "pipeline_id": {"type": "string", "minLength": 1},
+    "mcp_transport": {"enum": ["stdio", "streamable_http"]},
+    "state_backend": {"enum": ["memory", "redis"]},
+    "input_manifest_id": {"type": "string"},
+    "calculation_run_id": {"type": "string"},
+    "status": {"enum": ["created", "ingesting", "planned", "calculating", "persisted", "completed", "failed"]}
+  },
+  "additionalProperties": true
+}

@@ -24,6 +24,8 @@ def test_tool_specs_cover_skill_groups() -> None:
         "risk",
         "pnl",
         "portfolio",
+        "olap",
+        "pipeline",
         "scheduler",
     }
     assert len(ALL_TOOLS) > 40
@@ -31,7 +33,19 @@ def test_tool_specs_cover_skill_groups() -> None:
 
 def test_key_placeholder_tools_registered() -> None:
     names = {name for name, _ in ALL_TOOLS}
-    for required in ("compile_trade", "generate_risk_cube", "build_path_cube", "run_adjoint", "forecast_pnl"):
+    required_tools = (
+        "compile_trade",
+        "generate_risk_cube",
+        "build_path_cube",
+        "run_adjoint",
+        "forecast_pnl",
+        "olap_query",
+        "write_risk_store",
+        "ingest_instruments",
+        "ingest_market_data",
+        "trigger_pnl_forecast",
+    )
+    for required in required_tools:
         assert required in names
 
 

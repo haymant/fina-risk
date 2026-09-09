@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fina-risk.dev/schema/storage-boundaries.schema.json",
+  "title": "Fina Risk Storage Boundaries",
+  "type": "object",
+  "required": ["schema_version", "hot", "warm", "cold"],
+  "properties": {
+    "schema_version": {"const": "storage-boundaries.v1"},
+    "hot": {"type": "array", "items": {"type": "string"}},
+    "warm": {"type": "array", "items": {"type": "string"}},
+    "cold": {"type": "array", "items": {"type": "string"}},
+    "append_policy": {"type": "string"},
+    "object_store": {"enum": ["gcs_s3_compatible", "local_filesystem"]}
+  },
+  "additionalProperties": false
+}

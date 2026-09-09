@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fina-risk.dev/schema/execution-plan.schema.json",
+  "title": "Fina Risk Execution Plan",
+  "type": "object",
+  "required": ["schema_version", "target", "reuse", "execution", "phases"],
+  "properties": {
+    "schema_version": {"const": "execution-plan.v1"},
+    "target": {
+      "type": "object",
+      "required": ["instruments", "paths", "sensitivities"],
+      "properties": {
+        "instruments": {"type": "integer", "minimum": 0},
+        "underlyings": {"type": "integer", "minimum": 0},
+        "paths": {"type": "integer", "minimum": 1},
+        "sensitivities": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "reuse": {"type": "array", "items": {"type": "string"}},
+    "execution": {"type": "object", "additionalProperties": true},
+    "cost_drivers": {"type": "object", "additionalProperties": true},
+    "phases": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": true
+}

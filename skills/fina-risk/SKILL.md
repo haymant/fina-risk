@@ -17,6 +17,7 @@ Scope:
 - P&L explain and forecasting
 - Scenario analysis
 - Lifecycle state processing and corporate action adjustment
+- Normalized DuckDB/Arrow/Parquet OLAP with AG Grid SSRM query semantics
 
 ## Design principles
 
@@ -86,8 +87,16 @@ Load only the subsystem spec you need from `refs/*`; validate objects against `s
 | 11 | PnL | `refs/pnl/*` | forecast/explain_pnl, taylor_decomposition | PnLForecast, PnLExplain, TaylorBreakdown |
 | 12 | Portfolio | `refs/portfolio/*` | aggregate_portfolio, net_sensitivities, portfolio_scenarios | PortfolioView, PortfolioRisk |
 | 13 | Scheduler | `refs/scheduler/*` | submit/cancel/rebalance/inspect_job | JobRequest, JobStatus |
+| 14 | OLAP / Storage | `refs/olap/*` | write_risk_store, olap_query, storage_status, resolve_s3_dataset, link_olap_views | RiskStoreManifest, SSRMQuery, LinkedViewState |
+| 15 | E2E Pipeline | `refs/sample-user-journey.md` | ingest_instruments, ingest_market_data, read_risk_metadata, read_dashboard_metadata, plan_pnl_forecast, trigger_pnl_forecast, pipeline_state | InstrumentSnapshot, MarketSnapshot, ExecutionPlan, PipelineState |
 
 The **executable reference implementation** of these tools is the `fina-pricer` riskcube MCP server, which exposes `pricing_and_sensitivity`, `scenario_*`, `olap_query`, `gcs_read_parquet`, `storage_status`, and `set_storage_mode`, with typed schemas in `fina-pricer/skills/fina-pricer/schema/`.
+
+### Normalized OLAP principle
+
+The OLAP layer stores atomic risk-factor components rather than pre-generated analyst views. `risk_wide.parquet` contains one row per `{portfolio, instrument, leg, risk_factor}` with Taylor components such as delta, gamma, vega, rate P&L and method provenance kept together. `risk_long.parquet` preserves method observations and cross-checks for audit. A Taylor decomposition is therefore a DuckDB join/filter/aggregation over atomic rows, not a batch of materialized reports. Every storage and query operation is exposed as an MCP tool so an agent can create the store, issue AG Grid SSRM requests, inspect storage, resolve S3/GCS-compatible locations, and coordinate linked dashboard views.
+
+For an end-to-end portfolio P&L request, agents should follow `refs/sample-user-journey.md`. The journey is composed from atomic MCP calls rather than a monolithic endpoint. Use stdio when process-local HOT state is sufficient. Use Streamable HTTP with Redis-backed WARM metadata when state must survive requests, and keep large immutable COLD artifacts in S3-compatible Parquet.
 
 ## Canonical DTO hierarchy
 
@@ -114,6 +123,7 @@ Every object validates against its JSON Schema in `schema/`:
 | HOT | `schema/process-cache.schema.json`, `schema/path-cube.schema.json`, `schema/state-cube.schema.json`, `schema/aad-tape.schema.json` |
 | WARM | `schema/simulation-universe.schema.json`, `schema/payoff-graph.schema.json`, `schema/risk-cache.schema.json`, `schema/job-status.schema.json` |
 | COLD | `schema/path-cube-archive.schema.json`, `schema/risk-cube.schema.json`, `schema/risk-cell.schema.json`, `schema/pnl-explain.schema.json`, `schema/portfolio-risk.schema.json` |
+| Pipeline | `schema/pipeline-state.schema.json`, `schema/execution-plan.schema.json`, `schema/storage-boundaries.schema.json` |
 
 Risk report cells carry the originating RFK, measure, value, method (`AAD`/`PATHWISE`/`LRM`/`FD`) and fallback reason.
 
