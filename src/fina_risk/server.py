@@ -140,6 +140,7 @@ def _execute(name: str, payload: dict[str, Any] | None) -> dict[str, Any]:
             pnl=str(payload.get("pnl", "taylor1")),
             seed=int(payload.get("seed", 20260909)),
             execution=payload.get("execution"),
+            greeks=payload.get("greeks"),
         )
     if name in {"generate_risk_cube", "generate_greeks", "run_adjoint", "forecast_pnl"}:
         result = _execute("pricing_and_sensitivity", payload)

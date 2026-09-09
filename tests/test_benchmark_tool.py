@@ -21,6 +21,17 @@ def test_benchmark_tool_uses_shared_kernel() -> None:
     assert benchmark["taylor_pnl_checksum"] is not None
 
 
+def test_benchmark_reports_requested_greek_scopes() -> None:
+    requested = ["delta", "gamma", "vega", "bucket_vega", "irpv01", "fx_delta", "skew_delta", "cross_vega"]
+    result = _execute(
+        "benchmark_portfolio",
+        {"instruments": 10, "paths": 100, "sensitivities": "all", "greeks": requested},
+    )["benchmark"]
+    assert result["requested_greeks"] == requested
+    assert set(requested) - {"bucket_vega"} <= set(result["greeks"])
+    assert set(result["bucket_vega"]) == {"1M", "3M", "6M", "1Y", "2Y"}
+
+
 def test_benchmark_tool_accepts_100k_scope() -> None:
     result = _execute(
         "benchmark_portfolio",

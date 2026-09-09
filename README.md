@@ -76,6 +76,14 @@ The canonical request schema exposes execution toggles for daily state,
 correlation factorization, curve/vol/dividend/FX preparation, AAD scope,
 Taylor P&L order, structure caching, and output metrics.
 
+The execution plan defaults now enable all declared market, lifecycle, leg,
+aggregation, serialization, and metrics flags. It also requests the common
+Greek scopes: delta, gamma, vega, bucket vega, IRPV01, FX delta, skew delta,
+and cross vega. The benchmark output labels these as
+`PATHWISE_SHARED_KERNEL_PROXY` or `BUCKET_PROXY` until instrument-level market
+bumps or full QuantLib-Risks/XAD tapes are enabled; they must not be interpreted
+as portfolio-wide exact AAD results.
+
 The Python CPU reference now includes a **QuantLib-Risks/XAD first-order adjoint
 path** for fixed-branch smooth payoff arithmetic. Its outputs distinguish methods
 explicitly: the PUT uses AAD with a pathwise transition fallback, funding is
