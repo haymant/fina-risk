@@ -79,10 +79,10 @@ Taylor P&L order, structure caching, and output metrics.
 The execution plan defaults now enable all declared market, lifecycle, leg,
 aggregation, serialization, and metrics flags. It also requests the common
 Greek scopes: delta, gamma, vega, bucket vega, IRPV01, FX delta, skew delta,
-and cross vega. The benchmark output labels these as
-`PATHWISE_SHARED_KERNEL_PROXY` or `BUCKET_PROXY` until instrument-level market
-bumps or full QuantLib-Risks/XAD tapes are enabled; they must not be interpreted
-as portfolio-wide exact AAD results.
+and cross vega. The benchmark computes these with common-random-number bump and
+revalue calls through the shared pricing kernel, and labels the resulting
+portfolio sensitivities as `CRN_BUMP_REVALUE` or `CRN_BUCKET_BUMP_REVALUE`.
+They are full benchmark bump results, not portfolio-wide reverse-mode AAD.
 
 The Python CPU reference now includes a **QuantLib-Risks/XAD first-order adjoint
 path** for fixed-branch smooth payoff arithmetic. Its outputs distinguish methods

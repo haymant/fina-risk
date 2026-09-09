@@ -30,6 +30,10 @@ def test_benchmark_reports_requested_greek_scopes() -> None:
     assert result["requested_greeks"] == requested
     assert set(requested) - {"bucket_vega"} <= set(result["greeks"])
     assert set(result["bucket_vega"]) == {"1M", "3M", "6M", "1Y", "2Y"}
+    assert result["greeks"]["delta"]["method"] == "CRN_BUMP_REVALUE"
+    assert result["greeks"]["gamma"]["method"] == "CRN_BUMP_REVALUE"
+    assert result["greeks"]["vega"]["method"] == "CRN_BUMP_REVALUE"
+    assert result["bucket_vega"]["1Y"]["method"] == "CRN_BUCKET_BUMP_REVALUE"
 
 
 def test_benchmark_tool_accepts_100k_scope() -> None:

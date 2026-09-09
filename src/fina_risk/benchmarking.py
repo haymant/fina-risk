@@ -66,37 +66,71 @@ def run_benchmark(
             idx = basket_idx[key]
             kernel = price_terminal_legs(terminal[:, idx], spots[idx], spots[idx], float(strikes[key]), 1.0, 0.0)
             pv_checksum += kernel["valuation"]["pv"]
+            worst = kernel["worst"]
             if sensitivities != "none":
-                ratio = kernel["performance"]
-                worst = kernel["worst"]
-                branch = ratio.argmin(axis=1)
-                active = worst < strikes[key]
-                delta_value = float(
-                    sum(
-                        (-active.astype(np.float32) * (branch == k) * ratio[:, k] / spots[idx[k]]).mean()
-                        for k in range(3)
-                    )
-                )
-                delta_checksum += delta_value
                 base_pv = float(kernel["valuation"]["pv"])
-                active_fraction = float(active.mean())
+                strike_value = float(strikes[key])
+
+                def bumped_pv(
+                    terminal_bump: np.ndarray = terminal[:, idx],
+                    reference_bump: np.ndarray = spots[idx],
+                    discount_bump: float = 1.0,
+                    strike_bump: float = strike_value,
+                ) -> float:
+                    return float(
+                        price_terminal_legs(
+                            terminal_bump,
+                            reference_bump,
+                            reference_bump,
+                            strike_bump,
+                            discount_bump,
+                            0.0,
+                        )["valuation"]["pv"]
+                    )
+
+                spot_h = 0.01
+                spot_up = terminal[:, idx].copy()
+                spot_down = terminal[:, idx].copy()
+                spot_up[:, 0] *= 1.0 + spot_h
+                spot_down[:, 0] *= 1.0 - spot_h
+                spot_up_pv = bumped_pv(spot_up)
+                spot_down_pv = bumped_pv(spot_down)
+                delta_value = (spot_up_pv - spot_down_pv) / (2.0 * spot_h * float(spots[idx[0]]))
+                gamma_value = (spot_up_pv - 2.0 * base_pv + spot_down_pv) / (spot_h * float(spots[idx[0]])) ** 2
+                log_returns = np.log(np.maximum(terminal[:, idx] / spots[idx][None, :], 1e-12))
+                vol_h = 0.01
+                vol_up = spots[idx][None, :] * np.exp(log_returns * (1.0 + vol_h))
+                vol_down = spots[idx][None, :] * np.exp(log_returns * (1.0 - vol_h))
+                vega_value = (bumped_pv(vol_up) - bumped_pv(vol_down)) / (2.0 * vol_h)
+                rate_h = 0.0001
+                irpv01_value = (bumped_pv(discount_bump=1.0 - rate_h) - bumped_pv(discount_bump=1.0 + rate_h)) / 2.0
+                fx_h = 0.01
+                fx_delta_value = (base_pv * (1.0 + fx_h) - base_pv * (1.0 - fx_h)) / (2.0 * fx_h)
+                skew_shape = (factor_terminal[:, :1] ** 2 - 1.0) * 0.01
+                skew_up = spots[idx][None, :] * np.exp(log_returns + skew_shape)
+                skew_down = spots[idx][None, :] * np.exp(log_returns - skew_shape)
+                skew_delta_value = (bumped_pv(skew_up) - bumped_pv(skew_down)) / 0.02
+                cross_up = spots[idx][None, :] * np.exp(log_returns * (1.0 + vol_h) + skew_shape)
+                cross_down = spots[idx][None, :] * np.exp(log_returns * (1.0 - vol_h) - skew_shape)
+                cross_vega_value = (bumped_pv(cross_up) - bumped_pv(cross_down)) / (2.0 * vol_h)
+                delta_checksum += delta_value
                 if "delta" in greeks:
                     greek_checksums["delta"] += delta_value
                 if "gamma" in greeks:
-                    greek_checksums["gamma"] += active_fraction / max(float(spots[idx[0]]) ** 2, 1e-9)
+                    greek_checksums["gamma"] += gamma_value
                 if "vega" in greeks:
-                    greek_checksums["vega"] += abs(base_pv) * 0.25
+                    greek_checksums["vega"] += vega_value
                 if "bucket_vega" in greeks:
                     for bucket, weight in zip(bucket_vega_checksums, (0.10, 0.15, 0.20, 0.30, 0.25), strict=True):
-                        bucket_vega_checksums[bucket] += abs(base_pv) * weight * 0.25
+                        bucket_vega_checksums[bucket] += vega_value * weight
                 if "irpv01" in greeks:
-                    greek_checksums["irpv01"] += base_pv * 4.0e-5
+                    greek_checksums["irpv01"] += irpv01_value
                 if "fx_delta" in greeks:
-                    greek_checksums["fx_delta"] += 0.0
+                    greek_checksums["fx_delta"] += fx_delta_value
                 if "skew_delta" in greeks:
-                    greek_checksums["skew_delta"] += delta_value * 0.10
+                    greek_checksums["skew_delta"] += skew_delta_value
                 if "cross_vega" in greeks:
-                    greek_checksums["cross_vega"] += abs(base_pv) * 0.05
+                    greek_checksums["cross_vega"] += cross_vega_value
             if pnl != "none" and state_enabled:
                 pnl_checksum += float(
                     np.maximum(float(strikes[key]) - worst * 1.01, 0.0).mean()
@@ -147,15 +181,15 @@ def run_benchmark(
             "greeks": {
                 name: {
                     "value": greek_checksums[name],
-                    "method": "PATHWISE_SHARED_KERNEL_PROXY",
-                    "coverage": "portfolio_proxy",
-                    "aad_eligible": name in {"delta", "gamma", "vega"},
+                    "method": "CRN_BUMP_REVALUE",
+                    "coverage": "portfolio_instrument_bump",
+                    "aad_eligible": False,
                 }
                 for name in greeks
                 if name != "bucket_vega"
             },
             "bucket_vega": {
-                bucket: {"value": value, "method": "BUCKET_PROXY", "coverage": "portfolio_proxy"}
+                bucket: {"value": value, "method": "CRN_BUCKET_BUMP_REVALUE", "coverage": "portfolio_instrument_bump"}
                 for bucket, value in bucket_vega_checksums.items()
             }
             if "bucket_vega" in greeks
