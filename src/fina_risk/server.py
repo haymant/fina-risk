@@ -11,6 +11,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import JSONResponse
 
+from .benchmarking import run_benchmark
 from .pricing import bump_result, common_from_job, load_legacy_request, price_fixture
 
 TOOLS = {
@@ -129,6 +130,16 @@ def _execute(name: str, payload: dict[str, Any] | None) -> dict[str, Any]:
             result["base"]["valuation"]["pv"] = sum(x["pv"] for x in result["base"]["legs"])
             result["base"]["explainability"]["coupon"] = coupon["explainability"]["coupon"]
         return result
+    if name == "benchmark_portfolio":
+        return run_benchmark(
+            instruments=int(payload.get("instruments", 2000)),
+            underlyings=int(payload.get("underlyings", 1200)),
+            paths=int(payload.get("paths", 30000)),
+            factors=int(payload.get("factors", 12)),
+            sensitivities=str(payload.get("sensitivities", "delta")),
+            pnl=str(payload.get("pnl", "taylor1")),
+            seed=int(payload.get("seed", 20260909)),
+        )
     if name in {"generate_risk_cube", "generate_greeks", "run_adjoint", "forecast_pnl"}:
         result = _execute("pricing_and_sensitivity", payload)
         cells = [
@@ -207,8 +218,10 @@ def _execute(name: str, payload: dict[str, Any] | None) -> dict[str, Any]:
 
 
 for tool_name, description in ALL_TOOLS + [
-    ("pricing_and_sensitivity", "Price a legacy request and generate CRN sensitivities.")
+    ("pricing_and_sensitivity", "Price a legacy request and generate CRN sensitivities."),
+    ("benchmark_portfolio", "Benchmark shared-path portfolio PV, sensitivities, and Taylor P&L."),
 ]:
+
     def _tool(context: dict[str, Any] | None = None, *, tool_name: str = tool_name) -> dict[str, Any]:
         return _execute(tool_name, context)
 
@@ -220,7 +233,7 @@ for tool_name, description in ALL_TOOLS + [
 @mcp.custom_route("/healthz", methods=["GET"])
 async def healthz(_request: Any) -> JSONResponse:
     return JSONResponse(
-        {"status": "ok", "service": "fina-risk", "tools": len(ALL_TOOLS) + 1, "backend": "local-vectorized-cpu"}
+        {"status": "ok", "service": "fina-risk", "tools": len(ALL_TOOLS) + 2, "backend": "local-vectorized-cpu"}
     )
 
 
