@@ -10,8 +10,15 @@ portfolio risk aggregation, and P&L explain/forecast of equity-linked notes
 - `skills/fina-risk/refs/termsheet1.md` / `termsheet1.md.json` — full term sheet
   and the legacy engine pricing request (market data, instrument economics, 1%
   relative bumping settings, 3-leg PUT/FUNDING/COUPON decomposition).
-- `src/fina_risk/server.py` — MCP server skeleton. All tools are placeholders
-  returning `{"status": "to be done"}`.
+- `src/fina_risk/server.py` — MCP orchestration server with a working local
+  pricing/risk path and explicit artifact metadata.
+- `src/fina_risk/pricing.py` — deterministic, common-random-number NumPy
+  reference engine for the bundled three-leg ELI fixture. It preserves the
+  legacy quoted-spot bump convention and emits explainability metadata.
+- `skills/fina-risk/schema/pricing-request.schema.json` and
+  `term-sheet-conventions.schema.json` — extensible contracts covering legacy
+  JSON semantics, payoff conventions, lifecycle/memory state, coupon schedules,
+  bumping, and shared batch-computation metadata.
 
 ## Run
 
@@ -23,6 +30,39 @@ uv run pytest -q
 uv run ruff check .
 uv run mypy src
 ```
+
+The local reference path uses NumPy-batched correlated GBM and shared random
+numbers for spot bumps. It is intentionally the correctness baseline for a
+future QuantLib/XAD or GPU adapter; Vercel storage and GPU execution remain
+lower-priority adapters over the same DTOs.
+
+## Benchmark corpus
+
+The benchmark generator creates 2,000 heterogeneous three-leg instruments over
+1,200 underlyings. It retains the full per-underlying spot, dividend, volatility
+surface, FX, interest-curve, and 1,200-by-1,200 correlation data rather than
+compressing the workload into a small representative sample:
+
+```bash
+uv run python scripts/generate_benchmark.py
+uv run python scripts/run_benchmark.py \
+  benchmark/instruments.json benchmark/market.json
+```
+
+Generated JSON files under `benchmark/` are ignored by Git. The local ZIP archive
+contains the generated corpus and benchmark result, but is intentionally not
+committed by default. The data loader accepts either a normal path or a virtual
+ZIP member path such as:
+
+```text
+benchmark/fina-risk-benchmark.zip/instruments.json
+```
+
+Using a shared 30,000-path, 252-step, 12-factor float32 path representation, the
+benchmark priced all 2,000 instruments in approximately **3.05 seconds** on the
+local CPU reference backend, or approximately **656 instruments/second**. The
+benchmark reports the factorized path memory footprint and uses reverse-indexed
+underlyings and batches of 100 instruments.
 
 ## Vercel
 

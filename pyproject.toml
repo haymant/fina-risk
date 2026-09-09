@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11,<3.14"
 dependencies = [
     "mcp>=1.6,<2",
+    "numpy>=2.0,<3",
     "pydantic>=2.8,<3",
     "starlette>=0.40,<1",
 ]
@@ -41,5 +42,9 @@ target-version = "py311"
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["numpy.*"]
+follow_imports = "skip"

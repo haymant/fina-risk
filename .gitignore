@@ -13,3 +13,6 @@ wheels/
 .env
 .env.*
 !.env.example
+
+# Benchmark JSON, ZIP, and performance artifacts are generated locally by scripts.
+benchmark/*

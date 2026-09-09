@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pricing-request.schema.json",
+  "type": "object",
+  "required": ["instrument_key", "market_data", "legs", "parameters"],
+  "properties": {
+    "instrument_key": {"type": "string"},
+    "legacy_refs": {"type": "object", "additionalProperties": true},
+    "market_data": {"$ref": "#/$defs/market-snapshot.schema.json"},
+    "market_snapshot_ref": {"type": "string"},
+    "updated_lifecycle": {"$ref": "#/$defs/lifecycle-state.schema.json"},
+    "parameters": {"$ref": "#/$defs/pricing-parameters.schema.json"},
+    "common_economics": {"type": "object", "additionalProperties": true},
+    "legs": {"type": "array", "items": {"$ref": "#/$defs/compiled-leg.schema.json"}},
+    "batch": {"$ref": "#/$defs/batch-plan.schema.json"}
+  },
+  "$defs": {
+    "market-snapshot.schema.json": {"type":"object","required":["evaluation_date","underlyings","curves","vol_surfaces","correlations"],"properties":{"evaluation_date":{"type":["integer","string"]},"underlyings":{"type":"array","items":{"$ref":"#/$defs/underlying.schema.json"}},"curves":{"type":"array","items":{"type":"object","required":["id","day_count","pillars"]}},"vol_surfaces":{"type":"array","items":{"type":"object","required":["underlying","strike_type","reference","maturities","strikes","volatility"]}},"correlations":{"type":"array","items":{"type":"object","required":["factors","value"]}},"legacy_market_data":{"type":"object","additionalProperties":true}}},
+    "underlying.schema.json":{"type":"object","required":["id","quoted_spot","reference_spot","currency"],"properties":{"id":{"type":"string"},"quoted_spot":{"type":"number"},"reference_spot":{"type":"number"},"bid":{"type":"number"},"ask":{"type":"number"},"currency":{"type":"string"},"dividends":{"type":"array","items":{"type":"object","required":["ex_date","amount"]}}}},
+    "compiled-leg.schema.json":{"type":"object","required":["leg_id","leg_type","multiplier","notional"],"properties":{"leg_id":{"type":["integer","string"]},"leg_type":{"enum":["intrinsic_option","funding","coupon","custom"]},"leg_name":{"type":"string"},"multiplier":{"type":"number"},"notional":{"type":"number"},"legacy_deal_data":{"type":"object","additionalProperties":true},"payoff":{"type":"object","additionalProperties":true}}},
+    "lifecycle-state.schema.json":{"type":"object","properties":{"already_knock_in":{"type":"boolean"},"memory_locked":{"type":"array","items":{"type":"boolean"}},"memory_dates":{"type":"array","items":{"type":["integer","string"]}},"applied_fixings":{"type":"array","items":{"type":"object","additionalProperties":true}},"status":{"type":"string"}}},
+    "pricing-parameters.schema.json":{"type":"object","required":["bump_size","bump_mode","method_priority","seed"],"properties":{"bump_size":{"type":"number","const":0.01},"bump_mode":{"const":"relative"},"method_priority":{"type":"array","items":{"enum":["AAD","PATHWISE","LRM","FD"]}},"seed":{"type":"integer"},"common_random_numbers":{"type":"boolean"},"paths":{"type":"integer","minimum":1},"steps":{"type":"integer","minimum":1},"smoothing":{"type":["object","null"],"properties":{"enabled":{"type":"boolean"},"width":{"type":"number"}}}}},
+    "batch-plan.schema.json":{"type":"object","properties":{"trade_count":{"type":"integer"},"shared_market_snapshot":{"type":"boolean"},"shared_path_cube":{"type":"boolean"},"vector_width":{"type":"integer"},"chunk_size":{"type":"integer"},"parallelism":{"type":"integer"},"backend":{"enum":["gpu","simd_cpu","scalar_cpu"]}}}
+  }
+}

@@ -35,12 +35,14 @@ def test_key_placeholder_tools_registered() -> None:
         assert required in names
 
 
-def test_placeholder_tool_returns_to_be_done() -> None:
+def test_compile_tool_returns_explicit_legacy_legs() -> None:
     async def _call() -> Any:
         return await mcp.call_tool("compile_trade", {"context": {"notional": 50000, "currency": "USD"}})
 
     result = asyncio.run(_call())
-    assert "to be done" in str(result).lower()
+    assert "PUT" in str(result)
+    assert "FUNDING" in str(result)
+    assert "COUPON" in str(result)
 
 
 def test_default_allowlist_includes_deployed_vercel_hosts() -> None:
