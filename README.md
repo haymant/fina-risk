@@ -64,6 +64,20 @@ local CPU reference backend, or approximately **656 instruments/second**. The
 benchmark reports the factorized path memory footprint and uses reverse-indexed
 underlyings and batches of 100 instruments.
 
+Fixture and benchmark leg PVs both execute through the shared
+`price_terminal_legs.v1` kernel. Their adapters differ only in legacy/augmented
+input normalization and coupon cash-flow preparation; PUT, FUNDING, aggregate
+PV, and leg-sign conventions are not duplicated in the benchmark runner.
+
+The Python CPU reference now includes a **QuantLib-Risks/XAD first-order adjoint
+path** for fixed-branch smooth payoff arithmetic. Its outputs distinguish methods
+explicitly: the PUT uses AAD with a pathwise transition fallback, funding is
+AAD-eligible, and worst-of/knock-in/physical-delivery and memory-coupon
+transitions retain explicit fallback reasons. Both the fixture result and
+benchmark result include first-order Taylor P&L components (`forecastPnl`,
+`actualPnl`, and `unexplainedPnl`) with AAD-based forecast contributions where
+the tape is eligible.
+
 ## Vercel
 
 Mirrors the `fina-pricer` deployment practice: `api/index.py` rewrites the

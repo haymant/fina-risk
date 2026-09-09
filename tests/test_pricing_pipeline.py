@@ -1,6 +1,9 @@
 import json
 from pathlib import Path
 
+import numpy as np
+
+from fina_risk.pricing import common_from_job, market_from_legacy, price_terminal_legs
 from fina_risk.server import _execute
 
 FIXTURE = Path(__file__).parents[1] / "skills/fina-risk/refs/termsheet1.md.json"
@@ -46,3 +49,35 @@ def test_coupon_leg_uses_unpaid_counts_and_payment_lag() -> None:
     assert sum(x["unpaid_fixings"] for x in detail["unpaid_periods"]) == 111
     assert [x["payment_lag_days"] for x in detail["unpaid_periods"]] == [2, 4, 2, 2, 2, 2]
     assert detail["quote_scale"] == 10.0
+
+
+def test_fixture_reports_aad_boundary_and_taylor_pnl() -> None:
+    result = _execute(
+        "pricing_and_sensitivity", {"request": json.loads(FIXTURE.read_text()), "paths": 4000, "seed": 1729}
+    )
+    assert result["aad"]["available"] is True
+    assert result["aad"]["engine"] == "QuantLib-Risks/XAD"
+    assert abs(result["aad"]["value"] - result["base"]["put_option_price"]) < 1e-12
+    assert result["taylor_decomposition"]["method"] == "AAD_PLUS_FD_RESIDUAL"
+    assert all(x["method"] == "AAD_WITH_PATHWISE_TRANSITION_FALLBACK" for x in result["sensitivities"])
+    assert result["base"]["explainability"]["risk_methods"]["put"]["aad_eligible"] is True
+    assert result["base"]["explainability"]["risk_methods"]["funding"]["selected_method"] == "AAD"
+
+
+def test_fixture_adapter_matches_shared_terminal_leg_kernel() -> None:
+    request = json.loads(FIXTURE.read_text())
+    common = common_from_job(request["Chunk"]["Jobs"][0])
+    result = _execute("pricing_and_sensitivity", {"request": request, "paths": 4000, "seed": 1729})
+    market = market_from_legacy(common, paths=4000, seed=1729)
+    terminal = result["base"]["artifacts"]["path_cube"]["terminal"]
+    coupon = next(x["pv"] for x in result["base"]["legs"] if x["leg_name"] == "COUPON")
+    kernel = price_terminal_legs(
+        np.asarray(terminal),
+        market.quoted_spots,
+        market.reference_spots,
+        result["base"]["explainability"]["moneyness"],
+        result["base"]["discount_factor"],
+        coupon,
+    )
+    assert kernel["pricing_kernel"] == "price_terminal_legs.v1"
+    assert kernel["valuation"]["pv"] == result["base"]["valuation"]["pv"]

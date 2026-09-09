@@ -8,6 +8,7 @@ dependencies = [
     "mcp>=1.6,<2",
     "numpy>=2.0,<3",
     "pydantic>=2.8,<3",
+    "quantlib-risks>=1.33.3",
     "starlette>=0.40,<1",
 ]
 

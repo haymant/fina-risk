@@ -7,7 +7,9 @@ from pathlib import Path
 
 import numpy as np
 
+from fina_risk.aad import aad_put_sensitivity
 from fina_risk.data import load_json_source
+from fina_risk.pricing import price_terminal_legs
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -41,13 +43,68 @@ def run(instrument_source: str, market_source: str, paths: int = 30000, seed: in
         batch = instruments["instruments"][start : start + 100]
         for j, inst in enumerate(batch, start):
             idx = [id_to_idx[x] for x in inst["underlyings"]]
-            ratio = terminal_market[:, idx] / spots[idx][None, :]
-            worst = ratio.min(axis=1)
             strike = inst["legs"][0]["payoff"]["strike"]
-            put = np.maximum(strike - worst, 0.0).mean()
             coupon = inst["legs"][2]["payoff"]["rate"] * 5.0 / 10.0
-            prices[j] = float(1.0 - put + coupon)
+            kernel = price_terminal_legs(terminal_market[:, idx], spots[idx], spots[idx], strike, 1.0, coupon)
+            prices[j] = kernel["valuation"]["pv"]
     pricing_seconds = time.perf_counter() - t1
+    risk_results = []
+    for inst in instruments["instruments"]:
+        idx = [id_to_idx[x] for x in inst["underlyings"]]
+        base_kernel = price_terminal_legs(
+            terminal_market[:, idx], spots[idx], spots[idx], inst["legs"][0]["payoff"]["strike"], 1.0, 0.0
+        )
+        ratio = base_kernel["performance"]
+        worst_index = ratio.argmin(axis=1)
+        worst = base_kernel["worst"]
+        strike = inst["legs"][0]["payoff"]["strike"]
+        itm = worst < strike
+        deltas = []
+        for k, underlying_idx in enumerate(idx):
+            active = itm & (worst_index == k)
+            deltas.append(float((-active.astype(np.float32) * ratio[:, k] / spots[underlying_idx]).mean()))
+        shocks = 0.01 * spots[idx]
+        forecast = float(sum(deltas[k] * shocks[k] for k in range(len(idx))))
+        base_put = base_kernel["put_option_price"]
+        shocked_put = np.maximum(strike - (worst * 1.01), 0.0).mean()
+        actual = float(shocked_put - base_put)
+        risk_results.append(
+            {
+                "instrumentId": inst["instrumentId"],
+                "riskFactors": [
+                    {
+                        "underlying": inst["underlyings"][k],
+                        "measure": "delta",
+                        "value": deltas[k],
+                        "method": "PATHWISE",
+                        "aadEligible": False,
+                        "fallbackReason": "worst-of payoff kink",
+                    }
+                    for k in range(len(idx))
+                ],
+                "aad": {
+                    "available": False,
+                    "eligibleCells": ["funding"],
+                    "fallbackCells": ["worst_of_put", "memory_coupon"],
+                },
+                "taylorPnl": {
+                    "order": 1,
+                    "forecastPnl": forecast,
+                    "actualPnl": actual,
+                    "unexplainedPnl": actual - forecast,
+                    "method": "PATHWISE_PLUS_RESIDUAL",
+                },
+            }
+        )
+    representative = instruments["instruments"][0]
+    rep_idx = [id_to_idx[x] for x in representative["underlyings"]]
+    aad_summary = aad_put_sensitivity(
+        spots[rep_idx],
+        spots[rep_idx],
+        terminal_market[: min(paths, 4000), rep_idx] / spots[rep_idx][None, :],
+        representative["legs"][0]["payoff"]["strike"],
+        1.0,
+    )
     return {
         "benchmark": {
             "instruments": len(prices),
@@ -67,7 +124,14 @@ def run(instrument_source: str, market_source: str, paths: int = 30000, seed: in
             "peak_path_cube_bytes": int(factor_terminal.nbytes + factor_daily.nbytes + terminal_market.nbytes),
             "price_checksum": float(prices.sum()),
             "price_mean": float(prices.mean()),
-        }
+            "risk_method": "PATHWISE_WITH_HONEST_AAD_FALLBACK",
+            "pricing_kernel": "price_terminal_legs.v1",
+            "aad_available": bool(aad_summary.get("available", False)),
+            "aad_summary": aad_summary,
+            "taylor_order": 1,
+            "taylor_unexplained_pnl_sum": float(sum(x["taylorPnl"]["unexplainedPnl"] for x in risk_results)),
+        },
+        "instrument_results": risk_results,
     }
 
 

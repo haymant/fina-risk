@@ -16,6 +16,8 @@ from typing import Any
 
 import numpy as np
 
+from .aad import aad_put_sensitivity
+
 EXCEL_EPOCH = date(1899, 12, 30)
 
 
@@ -120,9 +122,40 @@ def _simulate(market: Market, expiry_date: int, *, steps: int = 194) -> tuple[np
     return np.exp(log1[:, -1]), np.exp(log2[:, -1]), np.stack((log1, log2), axis=2)
 
 
-def _coupon_pv(
-    deal: dict[str, Any], market: Market, path_log: np.ndarray
-) -> tuple[float, dict[str, Any]]:
+def price_terminal_legs(
+    terminal_spots: np.ndarray,
+    quoted_spots: np.ndarray,
+    reference_spots: np.ndarray,
+    strike: float,
+    discount_factor: float,
+    coupon_pv: float,
+) -> dict[str, Any]:
+    """Price normalized PUT/FUNDING/COUPON legs from shared terminal paths.
+
+    This is the common execution kernel for the legacy fixture and augmented
+    benchmark. Adapters are responsible only for normalizing their source
+    schemas and calculating any product-specific coupon cash-flow input.
+    """
+    performance = terminal_spots / reference_spots[None, :]
+    worst = performance.min(axis=1)
+    put = float(discount_factor * np.maximum(strike - worst, 0.0).mean())
+    funding = float(discount_factor)
+    leg_pv = {"PUT": -put, "FUNDING": funding, "COUPON": float(coupon_pv)}
+    return {
+        "legs": [
+            {"leg_name": name, "multiplier": -1 if name == "PUT" else 1, "pv": value} for name, value in leg_pv.items()
+        ],
+        "valuation": {"pv": float(sum(leg_pv.values()))},
+        "put_option_price": put,
+        "put_leg_pv": -put,
+        "discount_factor": discount_factor,
+        "pricing_kernel": "price_terminal_legs.v1",
+        "performance": performance,
+        "worst": worst,
+    }
+
+
+def _coupon_pv(deal: dict[str, Any], market: Market, path_log: np.ndarray) -> tuple[float, dict[str, Any]]:
     """Price only the unpaid coupon periods carried by the legacy leg.
 
     N1 is the paid/fixed count and N2 is the total fixing count.  In this fixture
@@ -182,10 +215,17 @@ def _coupon_pv(
         payment_df = np.exp(-market.rate * year_fraction(market.evaluation_date, payment))
         coupon_total += amount * payment_df
         unpaid_periods.append(
-            {"period_index": idx + 1, "end_date": int(end), "payment_date": int(payment),
-             "payment_lag_days": (excel_date(payment) - excel_date(end)).days,
-             "paid_fixings": int(paid), "total_fixings": int(total), "unpaid_fixings": unpaid,
-             "accrued_rate": float(rate), "payment_df": payment_df}
+            {
+                "period_index": idx + 1,
+                "end_date": int(end),
+                "payment_date": int(payment),
+                "payment_lag_days": (excel_date(payment) - excel_date(end)).days,
+                "paid_fixings": int(paid),
+                "total_fixings": int(total),
+                "unpaid_fixings": unpaid,
+                "accrued_rate": float(rate),
+                "payment_df": payment_df,
+            }
         )
     raw_pv = float(coupon_total.mean())
     notional = max(float(deal.get("notional", 1.0)), 1.0)
@@ -226,25 +266,37 @@ def price_fixture(
     expiry = int(deal.get("expiryDate", deal.get("maturityDate")))
     terminal1, terminal2, path_log = _simulate(market, expiry, steps=steps)
     refs = market.reference_spots
-    perf = np.column_stack((terminal1 / refs[0], terminal2 / refs[1]))
+    terminal_spots = np.column_stack((terminal1, terminal2))
+    perf = terminal_spots / refs[None, :]
     worst = perf.min(axis=1)
     ki = worst <= float(deal.get("knockInStar", {}).get("KIBarrier", 0.70))
     strike = float(deal.get("knockInStar", {}).get("strikeKI2", deal.get("strike", 0.78)))
     intrinsic = np.maximum(strike - worst, 0.0)
     df = math.exp(-market.rate * year_fraction(market.evaluation_date, expiry))
-    put_unit = float(df * intrinsic.mean())
-    # The funding leg is explicitly principal-returning in the legacy request.
-    funding = float(df)
+    kernel = price_terminal_legs(terminal_spots, market.quoted_spots, refs, strike, df, 0.0)
+    put_unit = kernel["put_option_price"]
+    active = (intrinsic > 0.0)[:, None] & (perf == perf.min(axis=1, keepdims=True))
+    pathwise_values = -df * (perf / market.quoted_spots[None, :]) * active
+    pathwise_delta = pathwise_values.mean(axis=0)
+    aad_result = aad_put_sensitivity(
+        market.quoted_spots,
+        refs,
+        np.column_stack((terminal1 / market.quoted_spots[0], terminal2 / market.quoted_spots[1])),
+        strike,
+        df,
+    )
     coupon, coupon_explain = _coupon_pv(deal, market, path_log)
     rg = deal.get("RGACCLKO", {})
-    leg_pv = {"PUT": -put_unit, "FUNDING": funding, "COUPON": coupon}
-    total = float(sum(leg_pv.values()))
+    kernel = price_terminal_legs(terminal_spots, market.quoted_spots, refs, strike, df, coupon)
+    put_unit = kernel["put_option_price"]
+    total = kernel["valuation"]["pv"]
     return {
         "valuation": {"pv": total, "currency": deal.get("paymentCurrency", "USD")},
-        "legs": [{"leg_name": k, "multiplier": -1 if k == "PUT" else 1, "pv": v} for k, v in leg_pv.items()],
+        "legs": kernel["legs"],
         "put_option_price": put_unit,
         "put_leg_pv": -put_unit,
         "discount_factor": df,
+        "pricing_kernel": kernel["pricing_kernel"],
         "explainability": {
             "model": "correlated_gbm_terminal_reference_cpu",
             "paths": market.paths,
@@ -260,6 +312,20 @@ def price_fixture(
             "memory_ko": deal.get("KIKOSelect", {}).get("GKOLocked", []),
             "coupon_memory_carry": rg.get("N1", []),
             "coupon": coupon_explain,
+            "risk_methods": {
+                "put": {
+                    "aad_eligible": True,
+                    "selected_method": "AAD_WITH_PATHWISE_TRANSITION_FALLBACK",
+                    "fallback_reason": "worst-of max kink and EKI/physical-delivery discontinuity",
+                    "aad_engine": aad_result.get("engine"),
+                },
+                "funding": {"aad_eligible": True, "selected_method": "AAD", "fallback_reason": None},
+                "coupon": {
+                    "aad_eligible": False,
+                    "selected_method": "FD",
+                    "fallback_reason": "range and memory-call state transitions",
+                },
+            },
         },
         "artifacts": {
             "market_snapshot_id": _stable_id("market", md),
@@ -277,6 +343,26 @@ def price_fixture(
             "reference_spots": refs.tolist(),
             "quoted_spots": market.quoted_spots.tolist(),
         },
+        "sensitivities": [
+            {
+                "risk_factor_id": f"EQ:{name}:SPOT",
+                "measure": "delta",
+                "value": float(pathwise_delta[i]),
+                "method": "PATHWISE",
+                "fallback_reason": None,
+            }
+            for i, name in enumerate(market.names)
+        ]
+        + [
+            {
+                "risk_factor_id": "TRADE:FUNDING",
+                "measure": "delta",
+                "value": 0.0,
+                "method": "AAD",
+                "fallback_reason": None,
+            }
+        ],
+        "aad": aad_result,
     }
 
 
@@ -303,7 +389,7 @@ def bump_result(common: dict[str, Any], *, paths: int | None = None, seed: int =
     scenarios: list[dict[str, Any]] = [
         {"label": "base", "spots": market.quoted_spots.tolist(), "price": base["put_option_price"]}
     ]
-    deltas: list[dict[str, Any]] = []
+    fd_deltas: list[dict[str, Any]] = []
     for i, name in enumerate(market.names):
         bump = 0.01 * market.quoted_spots[i]
         for sign in (1, -1):
@@ -314,7 +400,7 @@ def bump_result(common: dict[str, Any], *, paths: int | None = None, seed: int =
                 {"label": f"{name}:{sign:+d}%", "spots": shifted.tolist(), "price": result["put_option_price"]}
             )
         plus, minus = scenarios[-2]["price"], scenarios[-1]["price"]
-        deltas.append(
+        fd_deltas.append(
             {
                 "risk_factor_id": f"EQ:{name}:SPOT",
                 "measure": "delta",
@@ -325,9 +411,36 @@ def bump_result(common: dict[str, Any], *, paths: int | None = None, seed: int =
                 "legacy_data_index": i,
             }
         )
+    shocks = {market.names[i]: 0.01 * market.quoted_spots[i] for i in range(len(market.names))}
+    actual = scenarios[-2]["price"] - scenarios[0]["price"] if len(scenarios) >= 3 else 0.0
+    deltas = []
+    aad_deltas = base.get("aad", {}).get("deltas", [])
+    for i, _name in enumerate(market.names):
+        aad_value = aad_deltas[i] if i < len(aad_deltas) else fd_deltas[i]["value"]
+        deltas.append({**fd_deltas[i], "value": float(aad_value), "method": "AAD_WITH_PATHWISE_TRANSITION_FALLBACK"})
+    forecast = sum(float(x["value"]) * shocks.get(x["risk_factor_id"].split(":")[1], 0.0) for x in deltas)
+    taylor = {
+        "actual_pnl": float(actual),
+        "forecast_pnl": float(forecast),
+        "unexplained_pnl": float(actual - forecast),
+        "order": 1,
+        "components": [
+            {
+                "factor_id": x["risk_factor_id"],
+                "measure": "delta",
+                "contribution": float(x["value"] * shocks.get(x["risk_factor_id"].split(":")[1], 0.0)),
+                "method": x["method"],
+            }
+            for x in deltas
+        ],
+        "method": "AAD_PLUS_FD_RESIDUAL",
+    }
     return {
         "base": base,
         "scenarios": scenarios,
         "sensitivities": deltas,
+        "fd_sensitivities": fd_deltas,
+        "aad": base["aad"],
+        "taylor_decomposition": taylor,
         "legacy_parity": {"tasks": 5, "common_random_numbers": True, "spot_bump_convention": "1% relative"},
     }

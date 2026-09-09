@@ -178,6 +178,7 @@ dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "pydantic" },
+    { name = "quantlib-risks" },
     { name = "starlette" },
 ]
 
@@ -196,6 +197,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=1.6,<2" },
     { name = "numpy", specifier = ">=2.0,<3" },
     { name = "pydantic", specifier = ">=2.8,<3" },
+    { name = "quantlib-risks", specifier = ">=1.33.3" },
     { name = "starlette", specifier = ">=0.40,<1" },
 ]
 
@@ -729,6 +731,24 @@ wheels = [
 ]
 
 [[package]]
+name = "quantlib-risks"
+version = "1.33.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "xad" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/00/84/e27593afa9dae5e3a67e16fcffd2a787957e09600f926dd0cbe81831a26a/quantlib_risks-1.33.3-cp311-cp311-macosx_12_0_x86_64.whl", hash = "sha256:375132e7a7025eb297a648693c7a6d5115a4474af636f5214d9d8891d43382c9", size = 27119379, upload-time = "2024-04-04T15:48:14.243Z" },
+    { url = "https://files.pythonhosted.org/packages/fa/31/365305075ef9721af21ce3c3e31e89602443650bc1621a3fd0c6b20a1926/quantlib_risks-1.33.3-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:aa32db3d630a2b49e27f9da6573f2ce0436ccb134fe80f803a737229c62c7517", size = 35431600, upload-time = "2024-04-04T15:48:21.225Z" },
+    { url = "https://files.pythonhosted.org/packages/33/7b/b93b0eb99eb350145965abd1ddeda19ce948df9cffdaa9f8c4980241ba7c/quantlib_risks-1.33.3-cp311-cp311-musllinux_1_1_x86_64.whl", hash = "sha256:18ac32c1ff505c4d10b0e6ec6c82223cb61e0be312069e4c6e002bf48a90852a", size = 33030838, upload-time = "2024-04-04T15:48:26.851Z" },
+    { url = "https://files.pythonhosted.org/packages/0e/1b/f66a507b6262c3fe3f9f860ad5915fe91c080c4e633744c9b6c6a1e838b2/quantlib_risks-1.33.3-cp311-cp311-win_amd64.whl", hash = "sha256:5e8fc99dafdfa62cf67e30cf606174a314a590c82255242a8f0779cd968e0565", size = 15362689, upload-time = "2024-04-04T15:48:31.396Z" },
+    { url = "https://files.pythonhosted.org/packages/b3/76/c78c75b5ed1296fd439dfbaada34e8c447e4984eb02133854d6837b64e23/quantlib_risks-1.33.3-cp312-cp312-macosx_12_0_x86_64.whl", hash = "sha256:1b0c014417ad2ffd9ffa248f675017045f8f7b31fa7b0ebf16f485211cb14708", size = 27140798, upload-time = "2024-04-04T15:48:35.73Z" },
+    { url = "https://files.pythonhosted.org/packages/c8/0a/853bd9b6c00762a54090e5c7f05f514e14c8f27a2d1da00f035395b810f1/quantlib_risks-1.33.3-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:abb762e5ffc12e779f598ae8a5bc144209fba9b6aa11877c7e27366ebce523a7", size = 35453138, upload-time = "2024-04-04T15:48:40.63Z" },
+    { url = "https://files.pythonhosted.org/packages/f6/54/8c1ba35a602bde213e802b8756e3c4d912ce5f05f160dd05cda0d229e066/quantlib_risks-1.33.3-cp312-cp312-musllinux_1_1_x86_64.whl", hash = "sha256:227cbd76b09869d3b2213d7a8e1911891d4686b9842a030b123a06e36491a3c4", size = 33026933, upload-time = "2024-04-04T15:48:45.393Z" },
+    { url = "https://files.pythonhosted.org/packages/be/e1/26b21974dbe3af374a5ba941bbbd8d65df22e7c2f5aec03d109cbf5cb352/quantlib_risks-1.33.3-cp312-cp312-win_amd64.whl", hash = "sha256:cf85561a099f53c5a596bce39ae2f9215363e190c3f96668cbb11a34e1bd6380", size = 15363968, upload-time = "2024-04-04T15:48:48.92Z" },
+]
+
+[[package]]
 name = "referencing"
 version = "0.37.0"
 source = { registry = "https://pypi.org/simple" }
@@ -899,4 +919,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/f2/0f/3f86e61397dd33bf2ccf28188c40db6a740658aeebbbf6e7dbc101a1f487/uvicorn-0.52.4.tar.gz", hash = "sha256:73acfee47a0b133c5de13d219492d62d8a31e935f4fe6e41a232451a15379f86", size = 100627, upload-time = "2026-08-19T06:27:41.821Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f1/79/4a20b54ab0491485ccd8c077db2d39187c7f12b3e15485d38a7be37c81b4/uvicorn-0.52.4-py3-none-any.whl", hash = "sha256:f86e41a149d7d05a9969337e3946a9c171c06a5d42680896daaba624aeac8da1", size = 79871, upload-time = "2026-08-19T06:27:40.36Z" },
+]
+
+[[package]]
+name = "xad"
+version = "1.5.2"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f6/fd/e1de4348bcbfa6927fc2da00a8f4b03887d97c90f71aa5c56c382fd4051d/xad-1.5.2-cp311-cp311-macosx_12_0_x86_64.whl", hash = "sha256:f609ec12a59f3edd1785ebf8e570f6f5c2650cc8206e02037e0586a288f835fe", size = 222801, upload-time = "2024-04-04T14:03:26.186Z" },
+    { url = "https://files.pythonhosted.org/packages/c7/ff/5f09ebd40cd2e9f4e21849fd5462a4898900af020be2a751887a0fedfeee/xad-1.5.2-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:b59aa97b907b92c42feb2aa5fd1a33a05ada12abd548e94627a281058c002f1c", size = 266152, upload-time = "2024-04-04T14:03:27.445Z" },
+    { url = "https://files.pythonhosted.org/packages/88/a7/7dfb356e01806160714d9780d1cf30a371131a2ce990c00c1d420842c3bc/xad-1.5.2-cp311-cp311-musllinux_1_1_x86_64.whl", hash = "sha256:c167c24b8f549b6ca070b6b9cfe6bf95484bd2e90690d97ff45f737fb93752b8", size = 790535, upload-time = "2024-04-04T14:03:29.424Z" },
+    { url = "https://files.pythonhosted.org/packages/54/cf/78867743d0cfb78b163c9c6615d3f3b83e5385c5c7da4fd233d14919410d/xad-1.5.2-cp311-cp311-win_amd64.whl", hash = "sha256:a0c3abfaf0ea3a26edf74a9bcd8602f39dbdd4be055861558d866e62742cd9d3", size = 371081, upload-time = "2024-04-04T14:03:31.508Z" },
+    { url = "https://files.pythonhosted.org/packages/68/a7/7af209897be34d3293724296ed6def6643b055fee8a801a51d03e74d391a/xad-1.5.2-cp312-cp312-macosx_12_0_x86_64.whl", hash = "sha256:f785b1ca120980871e2779ecaf88c63e2d5b4744f4d51a970c5bcfb493427feb", size = 234155, upload-time = "2024-04-04T14:03:32.884Z" },
+    { url = "https://files.pythonhosted.org/packages/ec/67/4c179880f1a45e6eb5be5ccc63217b0a41f4391c4dd2c6f621dbdec5d91f/xad-1.5.2-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:1aae7c74644142e6b5aa0b8b1f5bf7144a88b01d123fd3757708f3de9b8aded7", size = 268857, upload-time = "2024-04-04T14:03:34.89Z" },
+    { url = "https://files.pythonhosted.org/packages/68/14/db8796d22aca64e5c29004d24f8ea59ff4be6278ea185be394c5a0731052/xad-1.5.2-cp312-cp312-musllinux_1_1_x86_64.whl", hash = "sha256:9a53f53dddd0d14295d19179f430caaa850eaca4e04d36e988f2699fc06250a2", size = 793589, upload-time = "2024-04-04T14:03:36.435Z" },
+    { url = "https://files.pythonhosted.org/packages/d3/a8/c2fae2245cb4fe77f6b73e92e5187a20db93a01c0fbaee3df4b043e4e334/xad-1.5.2-cp312-cp312-win_amd64.whl", hash = "sha256:216f945ad5449bbb3d9fd5ca4accbf85f6bf478a77be9658794f060fa7aa7ff9", size = 370345, upload-time = "2024-04-04T14:03:38.07Z" },
 ]
