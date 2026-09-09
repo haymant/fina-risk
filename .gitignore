@@ -16,3 +16,4 @@ wheels/
 
 # Benchmark JSON, ZIP, and performance artifacts are generated locally by scripts.
 benchmark/*
+.vercel
