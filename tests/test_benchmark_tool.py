@@ -34,6 +34,10 @@ def test_benchmark_reports_requested_greek_scopes() -> None:
     assert result["greeks"]["gamma"]["method"] == "CRN_BUMP_REVALUE"
     assert result["greeks"]["vega"]["method"] == "CRN_BUMP_REVALUE"
     assert result["bucket_vega"]["1Y"]["method"] == "CRN_BUCKET_BUMP_REVALUE"
+    assert len(result["delta_by_underlying"]) == 3
+    assert len(result["gamma_by_underlying"]) == 3
+    assert abs(sum(result["delta_by_underlying"]) - result["greeks"]["delta"]["value"]) < 1e-12
+    assert abs(sum(result["gamma_by_underlying"]) - result["greeks"]["gamma"]["value"]) < 1e-12
 
 
 def test_benchmark_tool_accepts_100k_scope() -> None:

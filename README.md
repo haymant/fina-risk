@@ -83,6 +83,9 @@ and cross vega. The benchmark computes these with common-random-number bump and
 revalue calls through the shared pricing kernel, and labels the resulting
 portfolio sensitivities as `CRN_BUMP_REVALUE` or `CRN_BUCKET_BUMP_REVALUE`.
 They are full benchmark bump results, not portfolio-wide reverse-mode AAD.
+For each three-underlying instrument, spot delta and gamma now run independent
+1% up/down bumps for underlying 1, underlying 2, and underlying 3; aggregate
+values are the sum of the per-underlying results.
 
 The Python CPU reference now includes a **QuantLib-Risks/XAD first-order adjoint
 path** for fixed-branch smooth payoff arithmetic. Its outputs distinguish methods

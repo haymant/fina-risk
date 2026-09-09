@@ -56,6 +56,8 @@ def run_benchmark(
     )
     pv_checksum = 0.0
     delta_checksum = 0.0
+    delta_by_underlying: np.ndarray = np.zeros(3, dtype=np.float64)
+    gamma_by_underlying: np.ndarray = np.zeros(3, dtype=np.float64)
     greek_checksums = {name: 0.0 for name in greeks}
     bucket_vega_checksums = {bucket: 0.0 for bucket in ("1M", "3M", "6M", "1Y", "2Y")}
     pnl_checksum = 0.0
@@ -89,14 +91,24 @@ def run_benchmark(
                     )
 
                 spot_h = 0.01
-                spot_up = terminal[:, idx].copy()
-                spot_down = terminal[:, idx].copy()
-                spot_up[:, 0] *= 1.0 + spot_h
-                spot_down[:, 0] *= 1.0 - spot_h
-                spot_up_pv = bumped_pv(spot_up)
-                spot_down_pv = bumped_pv(spot_down)
-                delta_value = (spot_up_pv - spot_down_pv) / (2.0 * spot_h * float(spots[idx[0]]))
-                gamma_value = (spot_up_pv - 2.0 * base_pv + spot_down_pv) / (spot_h * float(spots[idx[0]])) ** 2
+                delta_values: np.ndarray = np.zeros(3, dtype=np.float64)
+                gamma_values: np.ndarray = np.zeros(3, dtype=np.float64)
+                for underlying_position in range(3):
+                    spot_up = terminal[:, idx].copy()
+                    spot_down = terminal[:, idx].copy()
+                    spot_up[:, underlying_position] *= 1.0 + spot_h
+                    spot_down[:, underlying_position] *= 1.0 - spot_h
+                    spot_up_pv = bumped_pv(spot_up)
+                    spot_down_pv = bumped_pv(spot_down)
+                    spot_scale = 2.0 * spot_h * float(spots[idx[underlying_position]])
+                    delta_values[underlying_position] = (spot_up_pv - spot_down_pv) / spot_scale
+                    gamma_values[underlying_position] = (spot_up_pv - 2.0 * base_pv + spot_down_pv) / (
+                        spot_h * float(spots[idx[underlying_position]])
+                    ) ** 2
+                delta_value = float(delta_values.sum())
+                gamma_value = float(gamma_values.sum())
+                delta_by_underlying += delta_values
+                gamma_by_underlying += gamma_values
                 log_returns = np.log(np.maximum(terminal[:, idx] / spots[idx][None, :], 1e-12))
                 vol_h = 0.01
                 vol_up = spots[idx][None, :] * np.exp(log_returns * (1.0 + vol_h))
@@ -178,6 +190,8 @@ def run_benchmark(
             "instruments_per_second": instruments / max(elapsed, 1e-9),
             "pv_checksum": pv_checksum,
             "sensitivity_checksum": delta_checksum if sensitivities != "none" else None,
+            "delta_by_underlying": delta_by_underlying.tolist() if "delta" in greeks else [],
+            "gamma_by_underlying": gamma_by_underlying.tolist() if "gamma" in greeks else [],
             "greeks": {
                 name: {
                     "value": greek_checksums[name],
