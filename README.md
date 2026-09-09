@@ -69,6 +69,13 @@ Fixture and benchmark leg PVs both execute through the shared
 input normalization and coupon cash-flow preparation; PUT, FUNDING, aggregate
 PV, and leg-sign conventions are not duplicated in the benchmark runner.
 
+The production-comparable workload matrix, reuse-control design, and realistic
+100k FCN estimation guidance are documented in
+[`skills/fina-risk/refs/realistic-benchmark-plan.md`](skills/fina-risk/refs/realistic-benchmark-plan.md).
+The canonical request schema exposes execution toggles for daily state,
+correlation factorization, curve/vol/dividend/FX preparation, AAD scope,
+Taylor P&L order, structure caching, and output metrics.
+
 The Python CPU reference now includes a **QuantLib-Risks/XAD first-order adjoint
 path** for fixed-branch smooth payoff arithmetic. Its outputs distinguish methods
 explicitly: the PUT uses AAD with a pathwise transition fallback, funding is

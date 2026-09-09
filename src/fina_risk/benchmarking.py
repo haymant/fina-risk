@@ -17,12 +17,20 @@ def run_benchmark(
     sensitivities: str = "delta",
     pnl: str = "taylor1",
     seed: int = 20260909,
+    execution: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run a configurable shared-path portfolio benchmark through the pricing kernel."""
     instruments = max(1, int(instruments))
     underlyings = max(3, min(int(underlyings), 1200))
     paths = max(100, int(paths))
     factors = max(1, min(int(factors), underlyings))
+    execution = execution or {}
+    monitoring = str(execution.get("monitoring_frequency", "daily"))
+    state_enabled = bool(execution.get("range_accrual_state", True) or execution.get("memory_call_state", True))
+    structure_cache = bool(execution.get("structure_cache", True))
+    unique_structure_count = max(
+        1, min(int(execution.get("unique_structure_count", min(instruments, 1000))), instruments)
+    )
     rng = np.random.default_rng(seed)
     started = time.perf_counter()
     factor_terminal = rng.standard_normal((paths, factors), dtype=np.float32)
@@ -30,7 +38,7 @@ def run_benchmark(
     loadings /= np.maximum(np.linalg.norm(loadings, axis=1, keepdims=True), 1e-6)
     spots: np.ndarray = np.linspace(50.0, 850.0, underlyings, dtype=np.float32)
     terminal = spots[None, :] * np.exp(factor_terminal @ loadings.T)
-    unique_baskets = min(instruments, max(1000, underlyings // 3))
+    unique_baskets = unique_structure_count if structure_cache else instruments
     basket_idx = np.asarray([(3 * i + np.arange(3) * 137) % underlyings for i in range(unique_baskets)], dtype=np.int32)
     strikes: np.ndarray = np.asarray(
         [0.70 + 0.20 * ((i * 17) % 101) / 100 for i in range(unique_baskets)], dtype=np.float32
@@ -56,7 +64,7 @@ def run_benchmark(
                         for k in range(3)
                     )
                 )
-            if pnl != "none":
+            if pnl != "none" and state_enabled:
                 pnl_checksum += float(
                     np.maximum(float(strikes[key]) - worst * 1.01, 0.0).mean()
                     - np.maximum(float(strikes[key]) - worst, 0.0).mean()
@@ -74,6 +82,16 @@ def run_benchmark(
             "pricing_kernel": "price_terminal_legs.v1",
             "shared_path_cube": True,
             "structure_reuse": instruments > unique_baskets,
+            "enabled_components": {
+                "shared_market_data": bool(execution.get("shared_market_data", True)),
+                "shared_path_cube": bool(execution.get("shared_path_cube", True)),
+                "correlation_factorization": bool(execution.get("correlation_factorization", True)),
+                "monitoring_frequency": monitoring,
+                "range_accrual_state": bool(execution.get("range_accrual_state", True)),
+                "memory_call_state": bool(execution.get("memory_call_state", True)),
+                "payment_date_discounting": bool(execution.get("payment_date_discounting", True)),
+                "structure_cache": structure_cache,
+            },
             "elapsed_seconds": elapsed,
             "instruments_per_second": instruments / max(elapsed, 1e-9),
             "pv_checksum": pv_checksum,
