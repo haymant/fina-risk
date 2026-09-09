@@ -100,13 +100,20 @@ RiskResult price_fixture(const std::string& request_json, std::size_t paths, std
     const auto& underlyings = deal.at("instrument").at("underlyings");
     std::vector<double> refs;
     for (const auto& u : underlyings) refs.push_back(get_number(u, "spot", 100.0));
+    std::vector<double> quoted = refs;
+    if (request.contains("marketData") && request["marketData"].contains("equity")) {
+        const auto& equities = request["marketData"]["equity"];
+        for (std::size_t i = 0; i < std::min(refs.size(), equities.size()); ++i)
+            quoted[i] = get_number(equities[i], "spot", refs[i]);
+    }
     const double strike = deal.value("knockInStar", json::object()).value("strikeKI2", 0.78);
     std::mt19937_64 rng(seed);
     std::normal_distribution<double> normal(0.0, 1.0);
     double put = 0.0;
     for (std::size_t p = 0; p < paths; ++p) {
         double worst = 10.0;
-        for (double ref : refs) worst = std::min(worst, std::exp(0.20 * normal(rng)) * ref / ref);
+        for (std::size_t i = 0; i < refs.size(); ++i)
+            worst = std::min(worst, std::exp(0.20 * normal(rng)) * quoted[i] / refs[i]);
         put += std::max(strike - worst, 0.0);
     }
     put /= static_cast<double>(paths);
