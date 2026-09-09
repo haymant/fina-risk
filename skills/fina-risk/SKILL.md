@@ -98,6 +98,8 @@ The OLAP layer stores atomic risk-factor components rather than pre-generated an
 
 For an end-to-end portfolio P&L request, agents should follow `refs/sample-user-journey.md`. The journey is composed from atomic MCP calls rather than a monolithic endpoint. Use stdio when process-local HOT state is sufficient. Use Streamable HTTP with Redis-backed WARM metadata when state must survive requests, and keep large immutable COLD artifacts in S3-compatible Parquet.
 
+For layman explanations of structure reuse, correlation-factor compression, and the boundary between fixed-branch AAD, smoothed AAD, and CRN fallback, load `refs/uniqueness-factor-compression-and-aad.md`.
+
 ## Canonical DTO hierarchy
 
 ```text
