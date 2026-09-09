@@ -125,6 +125,7 @@ The skill is executable and testable against the bundled term-sheet fixture and 
 
 - `refs/termsheet1.md` — sanitized **full term sheet**: USD non-principal-protected ELI, 9-month daily-memory-callable note, final-fixing-date knock-in (EKI), worst-of 2-asset basket, physical delivery on knock-in.
 - `refs/termsheet1.md.json` — the **same product as a legacy pricing engine request**. It carries `marketData`, `instrument economics`, and the **PV pricing bumping settings**, and breaks the single instrument into its **three legs, one per `finaRefJobID`**.
+- PV - the legacy engine generates price 0.02113 for the PUT option, without any bumping.
 
 ### Legacy request anatomy
 

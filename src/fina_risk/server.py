@@ -115,9 +115,14 @@ _load_local_env()
 
 
 def _resolve_allowed_hosts() -> list[str]:
+    # Default follows the fina-pricer fix for the MCP 421 "Invalid Host header":
+    # the mcp matcher only supports exact host matches plus "host:*" port wildcards
+    # (no subdomain wildcards), so every deployed Vercel hostname must be listed.
+    # Set ALLOWED_HOSTS in the deployment environment to override this default.
     default = (
         "localhost,127.0.0.1,[::1],localhost:*,127.0.0.1:*,[::1]:*,"
-        "fina-risk.vercel.app,fina-risk-git-main-user.vercel.app"
+        "fina-risk.vercel.app,fina-risk.vercel.app:*,"
+        "fina-risk-zmrl.vercel.app,fina-risk-zmrl.vercel.app:*"
     )
     return [host.strip() for host in os.getenv("ALLOWED_HOSTS", default).split(",") if host.strip()]
 

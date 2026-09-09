@@ -1,4 +1,11 @@
 import asyncio
+import os
+from typing import Any
+
+from asgi_lifespan import LifespanManager
+from httpx import ASGITransport, AsyncClient
+from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from fina_risk import ALL_TOOLS, TOOLS, mcp
 
@@ -29,8 +36,67 @@ def test_key_placeholder_tools_registered() -> None:
 
 
 def test_placeholder_tool_returns_to_be_done() -> None:
-    async def _call() -> dict:
+    async def _call() -> Any:
         return await mcp.call_tool("compile_trade", {"context": {"notional": 50000, "currency": "USD"}})
 
     result = asyncio.run(_call())
     assert "to be done" in str(result).lower()
+
+
+def test_default_allowlist_includes_deployed_vercel_hosts() -> None:
+    saved = os.environ.get("ALLOWED_HOSTS")
+    os.environ.pop("ALLOWED_HOSTS", None)
+    try:
+        from fina_risk.server import _resolve_allowed_hosts
+
+        hosts = _resolve_allowed_hosts()
+    finally:
+        if saved:
+            os.environ["ALLOWED_HOSTS"] = saved
+        else:
+            os.environ.pop("ALLOWED_HOSTS", None)
+    assert "fina-risk-zmrl.vercel.app" in hosts
+    assert "fina-risk-zmrl.vercel.app:*" in hosts
+
+
+def _fresh_app() -> Any:
+    from fina_risk.server import _resolve_allowed_hosts
+
+    server = FastMCP(
+        "fina-risk-test",
+        stateless_http=True,
+        transport_security=TransportSecuritySettings(allowed_hosts=_resolve_allowed_hosts()),
+    )
+    return server.streamable_http_app()
+
+
+async def _mcp_initialize(host: str) -> int:
+    headers = {"Accept": "application/json, text/event-stream"}
+    async with LifespanManager(_fresh_app()) as manager:
+        transport = ASGITransport(app=manager.app)
+        async with AsyncClient(transport=transport, base_url=f"http://{host}") as client:
+            response = await client.post(
+                "/mcp",
+                headers=headers,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "params": {
+                        "protocolVersion": "2025-03-26",
+                        "capabilities": {},
+                        "clientInfo": {"name": "test", "version": "0"},
+                    },
+                    "method": "initialize",
+                },
+            )
+            return response.status_code
+
+
+def test_vercel_deployment_host_passes_host_security() -> None:
+    status = asyncio.run(_mcp_initialize("fina-risk-zmrl.vercel.app"))
+    assert status in (200, 406), f"/mcp rejected deployment host with {status}"
+
+
+def test_unknown_host_still_rejected() -> None:
+    status = asyncio.run(_mcp_initialize("attacker.example.com"))
+    assert status == 421
