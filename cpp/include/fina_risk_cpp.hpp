@@ -19,6 +19,22 @@ struct RiskResult {
     std::vector<LegResult> legs;
 };
 
+struct ParityResult {
+    std::size_t instruments{};
+    std::size_t underlyings{};
+    std::size_t paths{};
+    double pv_checksum{};
+    double delta_checksum{};
+    double delta_dollar_checksum{};
+    double gamma_checksum{};
+    double taylor_forecast_checksum{};
+    double taylor_actual_checksum{};
+    double taylor_unexplained_checksum{};
+    double elapsed_seconds{};
+    double instruments_per_second{};
+    std::string engine;
+};
+
 struct BenchmarkResult {
     std::size_t instruments{};
     std::size_t underlyings{};
@@ -49,7 +65,18 @@ BenchmarkResult run_benchmark(const std::string& instruments_json,
                               std::size_t paths = 30000,
                               std::uint64_t seed = 20260909);
 
+// C++ parity lane: identical math to parity_benchmark.cpp operating on a
+// caller-supplied shared float32 terminal cube. Accepts the augmented
+// instrument/market JSON schemas (`benchmark.instruments.v1.mcp` /
+// `benchmark.market.v1`) so the MCP backend chooses the executing parity.
+ParityResult run_cpp_parity(const std::string& instruments_json,
+                            const std::string& market_json,
+                            const std::vector<float>& terminal,
+                            std::uint64_t seed = 20260909,
+                            double bump = 0.01);
+
 std::string to_json(const BenchmarkResult& result);
+std::string to_json(const ParityResult& result);
 std::string to_json(const RiskResult& result);
 
 }  // namespace fina::risk

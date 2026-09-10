@@ -6,6 +6,9 @@ option(FINA_RISK_BUILD_XAD_AAD "Build the native XAD reverse-mode AAD benchmark"
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+if(NOT DEFINED CMAKE_POSITION_INDEPENDENT_CODE)
+  set(CMAKE_POSITION_INDEPENDENT_CODE ON)  # fina_risk_core links into the pybind shared object
+endif()
 
 find_package(nlohmann_json 3.11 REQUIRED)
 find_package(OpenMP QUIET)

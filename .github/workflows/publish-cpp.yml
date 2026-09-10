@@ -1,0 +1,88 @@
+name: Publish fina-risk-cpp
+
+on:
+  push:
+    paths:
+      - "native/**"
+    tags:
+      - "cpp-[0-9]+.[0-9]+.[0-9]+" # e.g. cpp-0.1.0
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: Build + Verify Wheels
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Build cp312 manylinux wheel from native/
+        run: |
+          cd native
+          uvx --from cibuildwheel cibuildwheel --package-dir . --only cp312-manylinux_x86_64 --output-dir ../dist
+        env:
+          CIBW_BUILD: "cp312-manylinux_*"
+
+      - name: Smoke-test wheel
+        run: |
+          uv venv /tmp/smoke --python 3.12
+          uv pip install --python /tmp/smoke/bin/python dist/*.whl
+          /tmp/smoke/bin/python -c "import fina_risk_cpp; print(fina_risk_cpp.__file__)"
+
+      - name: Upload Distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: fina-risk-cpp-dist
+          path: dist/
+
+  publish-to-testpypi:
+    name: Publish to TestPyPI
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+      - name: Download Distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: fina-risk-cpp-dist
+          path: dist/
+      - name: Publish to TestPyPI
+        run: uv publish --index testpypi --trusted-publishing always
+
+  publish-to-pypi:
+    name: Publish to PyPI
+    needs: publish-to-testpypi
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/fina-risk-cpp
+    permissions:
+      id-token: write
+      contents: read
+      attestations: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+      - name: Download Distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: fina-risk-cpp-dist
+          path: dist/
+      - name: Publish to PyPI
+        run: uv publish --trusted-publishing always

@@ -8,6 +8,46 @@ import numpy as np
 from .aad import aad_fixed_branch_market_sensitivities
 from .hybrid import hybrid_delta
 from .pricing import price_terminal_legs
+from .system_info import collect_cpu_info
+
+
+def build_benchmark_corpus(
+    *,
+    instruments: int,
+    underlyings: int,
+    paths: int,
+    factors: int,
+    seed: int,
+    unique_structure_count: int,
+    structure_cache: bool,
+) -> dict[str, Any]:
+    """Build the shared instrument corpus and float32 terminal cube.
+
+    Both the Python reference lane and the C++ parity lane consume this exact
+    corpus so that they operate on identical inputs and produce identical
+    pricing results. The cube is `(paths, underlyings)` float32 terminal spots
+    from the 12-factor loadings model with the configured seed.
+    """
+    rng = np.random.default_rng(seed)
+    factor_terminal = rng.standard_normal((paths, factors), dtype=np.float32)
+    loadings = rng.normal(0.0, 0.08, (underlyings, factors)).astype(np.float32)
+    loadings /= np.maximum(np.linalg.norm(loadings, axis=1, keepdims=True), 1e-6)
+    spots: np.ndarray = np.linspace(50.0, 850.0, underlyings, dtype=np.float32)
+    terminal = spots[None, :] * np.exp(factor_terminal @ loadings.T)
+    unique_baskets = unique_structure_count if structure_cache else instruments
+    basket_idx = np.asarray([(3 * i + np.arange(3) * 137) % underlyings for i in range(unique_baskets)], dtype=np.int32)
+    strikes: np.ndarray = np.asarray(
+        [0.70 + 0.20 * ((i * 17) % 101) / 100 for i in range(unique_baskets)], dtype=np.float32
+    )
+    return {
+        "spots": spots,
+        "terminal": terminal,
+        "factor_terminal": factor_terminal,
+        "loadings": loadings,
+        "unique_baskets": int(unique_baskets),
+        "basket_idx": basket_idx,
+        "strikes": strikes,
+    }
 
 
 def run_benchmark(
@@ -45,18 +85,22 @@ def run_benchmark(
     unique_structure_count = max(
         1, min(int(execution.get("unique_structure_count", min(instruments, 1000))), instruments)
     )
-    rng = np.random.default_rng(seed)
     started = time.perf_counter()
-    factor_terminal = rng.standard_normal((paths, factors), dtype=np.float32)
-    loadings = rng.normal(0.0, 0.08, (underlyings, factors)).astype(np.float32)
-    loadings /= np.maximum(np.linalg.norm(loadings, axis=1, keepdims=True), 1e-6)
-    spots: np.ndarray = np.linspace(50.0, 850.0, underlyings, dtype=np.float32)
-    terminal = spots[None, :] * np.exp(factor_terminal @ loadings.T)
-    unique_baskets = unique_structure_count if structure_cache else instruments
-    basket_idx = np.asarray([(3 * i + np.arange(3) * 137) % underlyings for i in range(unique_baskets)], dtype=np.int32)
-    strikes: np.ndarray = np.asarray(
-        [0.70 + 0.20 * ((i * 17) % 101) / 100 for i in range(unique_baskets)], dtype=np.float32
+    corpus = build_benchmark_corpus(
+        instruments=instruments,
+        underlyings=underlyings,
+        paths=paths,
+        factors=factors,
+        seed=seed,
+        unique_structure_count=unique_structure_count,
+        structure_cache=structure_cache,
     )
+    factor_terminal = corpus["factor_terminal"]
+    spots: np.ndarray = corpus["spots"]
+    terminal = corpus["terminal"]
+    unique_baskets = corpus["unique_baskets"]
+    basket_idx = corpus["basket_idx"]
+    strikes: np.ndarray = corpus["strikes"]
     pv_checksum = 0.0
     delta_checksum = 0.0
     delta_by_underlying: np.ndarray = np.zeros(3, dtype=np.float64)
@@ -249,6 +293,8 @@ def run_benchmark(
     elapsed = time.perf_counter() - started
     return {
         "benchmark": {
+            "backend": "python",
+            "backend_engine": "numpy_price_terminal_legs_v1",
             "requested_instruments": instruments,
             "unique_payoff_baskets": unique_baskets,
             "underlyings": underlyings,
@@ -349,6 +395,7 @@ def run_benchmark(
                 "market_aad_method_counts": market_aad_method_counts,
                 "delta_method_policy": "AAD_FIXED_BRANCH on stable paths; PATHWISE fallback on transition paths",
             },
+            "cpu": collect_cpu_info(),
             "risk_rows": risk_rows if emit_rows else None,
         }
     }

@@ -158,6 +158,22 @@ def _execute(name: str, payload: dict[str, Any] | None) -> dict[str, Any]:
             result["base"]["explainability"]["coupon"] = coupon["explainability"]["coupon"]
         return result
     if name == "benchmark_portfolio":
+        backend = str(payload.get("backend") or (payload.get("execution") or {}).get("backend") or "python").lower()
+        if backend == "cpp":
+            execution = dict(payload.get("execution") or {})
+            execution["hybrid_aad"] = False
+            execution["aad_tape_scope"] = "disabled"
+            from .cpp_parity import run_cpp_parity_benchmark
+
+            return run_cpp_parity_benchmark(
+                instruments=int(payload.get("instruments", 2000)),
+                underlyings=int(payload.get("underlyings", 1200)),
+                paths=int(payload.get("paths", 30000)),
+                factors=int(payload.get("factors", 12)),
+                seed=int(payload.get("seed", 20260909)),
+                execution=execution,
+                bump=float(payload.get("bump", 0.01)),
+            )
         return run_benchmark(
             instruments=int(payload.get("instruments", 2000)),
             underlyings=int(payload.get("underlyings", 1200)),
@@ -287,7 +303,11 @@ def _execute(name: str, payload: dict[str, Any] | None) -> dict[str, Any]:
 
 for tool_name, description in ALL_TOOLS + [
     ("pricing_and_sensitivity", "Price a legacy request and generate CRN sensitivities."),
-    ("benchmark_portfolio", "Benchmark shared-path portfolio PV, sensitivities, and Taylor P&L."),
+    (
+        "benchmark_portfolio",
+        "Benchmark shared-path portfolio PV, sensitivities, and Taylor P&L. `backend` in {\"python\", \"cpp\"} "
+        "selects the executing parity lane; `cpp` disables AAD and runs C++-parity CRN bump/pathwise math.",
+    ),
 ]:
 
     def _tool(context: dict[str, Any] | None = None, *, tool_name: str = tool_name) -> dict[str, Any]:

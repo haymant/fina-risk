@@ -230,6 +230,110 @@ BenchmarkResult run_benchmark(const std::string& instruments_json,
             checksum, checksum / static_cast<double>(trades.size())};
 }
 
+ParityResult run_cpp_parity(const std::string& instruments_json,
+                            const std::string& market_json,
+                            const std::vector<float>& terminal,
+                            std::uint64_t seed,
+                            double bump) {
+    const auto instruments = json::parse(instruments_json);
+    const auto market = json::parse(market_json);
+    const auto starts = std::chrono::steady_clock::now();
+    (void)seed;  // the caller-supplied cube already encodes the path seed
+    const auto& underlyings = market.at("underlyings");
+    const std::size_t n = underlyings.size();
+    const auto& trades = instruments.at("instruments");
+    auto& records = const_cast<json&>(trades);
+    std::unordered_map<std::string, std::size_t> id_to_index;
+    std::vector<double> spots(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        id_to_index.emplace(underlyings[i].at("id").get<std::string>(), i);
+        spots[i] = get_number(underlyings[i], "spot", 100.0);
+    }
+    const std::size_t paths = terminal.size() / n;
+    const double spot_h = bump;
+    double pv_checksum = 0.0;
+    double delta_checksum = 0.0;
+    double delta_dollar_checksum = 0.0;
+    double gamma_checksum = 0.0;
+    double forecast_checksum = 0.0;
+    double actual_checksum = 0.0;
+#pragma omp parallel for schedule(static) reduction(+:pv_checksum,delta_checksum,delta_dollar_checksum,gamma_checksum,forecast_checksum,actual_checksum)
+    for (std::int64_t t = 0; t < static_cast<std::int64_t>(records.size()); ++t) {
+        const auto& trade = records[static_cast<std::size_t>(t)];
+        std::vector<std::size_t> idx;
+        for (const auto& id : trade.at("underlyings")) idx.push_back(id_to_index.at(id.get<std::string>()));
+        const double strike = trade.at("legs")[0].at("payoff").value("strike", 0.78);
+        // Worst-of performance ratios from the shared terminal cube.
+        std::vector<double> worst(paths, 1.0e30);
+        for (std::size_t p = 0; p < paths; ++p) {
+            for (std::size_t k = 0; k < idx.size(); ++k) {
+                const double ratio = static_cast<double>(terminal[p * n + idx[k]]) / spots[idx[k]];
+                if (ratio < worst[p]) worst[p] = ratio;
+            }
+        }
+        double put_sum = 0.0;
+        for (std::size_t p = 0; p < paths; ++p) put_sum += std::max(strike - worst[p], 0.0);
+        const double base_put = put_sum / static_cast<double>(paths);
+        const double base_pv = 1.0 - base_put;
+        std::vector<double> deltas(idx.size(), 0.0);
+        std::vector<double> gammas(idx.size(), 0.0);
+        for (std::size_t k = 0; k < idx.size(); ++k) {
+            double up_sum = 0.0;
+            double down_sum = 0.0;
+            for (std::size_t p = 0; p < paths; ++p) {
+                double up_worst = 1.0e30;
+                double down_worst = 1.0e30;
+                for (std::size_t j = 0; j < idx.size(); ++j) {
+                    const double ratio = static_cast<double>(terminal[p * n + idx[j]]) / spots[idx[j]];
+                    up_worst = std::min(up_worst, ratio * (j == k ? 1.0 + spot_h : 1.0));
+                    down_worst = std::min(down_worst, ratio * (j == k ? 1.0 - spot_h : 1.0));
+                }
+                up_sum += std::max(strike - up_worst, 0.0);
+                down_sum += std::max(strike - down_worst, 0.0);
+            }
+            const double up = up_sum / static_cast<double>(paths);
+            const double down = down_sum / static_cast<double>(paths);
+            const double spot = spots[idx[k]];
+            deltas[k] = (up - down) / (2.0 * spot_h * spot);
+            gammas[k] = (up - 2.0 * base_put + down) / std::pow(spot_h * spot, 2.0);
+        }
+        double forecast = 0.0;
+        for (std::size_t k = 0; k < idx.size(); ++k) {
+            const double spot = spots[idx[k]];
+            forecast += deltas[k] * spot * spot_h + 0.5 * gammas[k] * std::pow(spot * spot_h, 2.0);
+            delta_dollar_checksum += deltas[k] * spot;
+        }
+        double shocked_put_sum = 0.0;
+        for (std::size_t p = 0; p < paths; ++p)
+            shocked_put_sum += std::max(strike - worst[p] * (1.0 + spot_h), 0.0);
+        const double actual = shocked_put_sum / static_cast<double>(paths) - base_put;
+        pv_checksum += base_pv;
+        for (const auto delta : deltas) delta_checksum += delta;
+        for (const auto gamma : gammas) gamma_checksum += gamma;
+        forecast_checksum += forecast;
+        actual_checksum += actual;
+    }
+    const auto finished = std::chrono::steady_clock::now();
+    const double elapsed = std::chrono::duration<double>(finished - starts).count();
+    const std::size_t instrument_count = records.size();
+    return {instrument_count, n, paths, pv_checksum, delta_checksum, delta_dollar_checksum,
+            gamma_checksum, forecast_checksum, actual_checksum, actual_checksum - forecast_checksum,
+            elapsed, instrument_count / std::max(elapsed, 1e-12), "cpp_native_parity"};
+}
+
+std::string to_json(const ParityResult& result) {
+    return json{
+        {"instruments", result.instruments}, {"underlyings", result.underlyings},
+        {"paths", result.paths}, {"pv_checksum", result.pv_checksum},
+        {"delta_checksum", result.delta_checksum}, {"delta_dollar_checksum", result.delta_dollar_checksum},
+        {"gamma_checksum", result.gamma_checksum}, {"taylor_forecast_checksum", result.taylor_forecast_checksum},
+        {"taylor_actual_checksum", result.taylor_actual_checksum},
+        {"taylor_unexplained_checksum", result.taylor_unexplained_checksum},
+        {"elapsed_seconds", result.elapsed_seconds}, {"instruments_per_second", result.instruments_per_second},
+        {"backend", result.engine}
+    }.dump(2);
+}
+
 std::string to_json(const BenchmarkResult& result) {
     return json{{"benchmark", {{"instruments", result.instruments}, {"underlyings", result.underlyings}, {"paths", result.paths}, {"steps", result.steps}, {"factor_count", result.factors}, {"path_build_seconds", result.path_build_seconds}, {"pricing_seconds", result.pricing_seconds}, {"total_seconds", result.total_seconds}, {"instruments_per_second", result.instruments_per_second}, {"peak_path_cube_bytes", result.peak_path_cube_bytes}, {"price_checksum", result.price_checksum}, {"price_mean", result.price_mean}, {"backend", "cpp_reference_optional_quantlib_xad"}}}}.dump(2);
 }
