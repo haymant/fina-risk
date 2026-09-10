@@ -1,5 +1,5 @@
 [project]
-name = "fina-risk"
+name = "fina-risk-mcp"
 version = "0.1.0"
 description = "fina-risk MCP orchestration skeleton: structured product pricing, AAD-first risk cubes, shared path simulation, portfolio risk and P&L"
 readme = "README.md"
@@ -12,11 +12,11 @@ dependencies = [
     "pydantic>=2.8,<3",
     "quantlib-risks>=1.33.3",
     "starlette>=0.40,<1",
-    "fina-risk-cpp>=0.1.0",
+    "fina-risk>=0.1.0",
 ]
 
 [tool.uv.sources]
-fina-risk-cpp = { path = "wheels/fina_risk_cpp-0.1.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl" }
+fina-risk = { path = "wheels/fina_risk-0.1.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl" }
 
 [project.scripts]
 fina-risk-mcp = "fina_risk:main"
@@ -24,6 +24,10 @@ fina-risk-mcp = "fina_risk:main"
 [build-system]
 requires = ["uv_build>=0.12.1,<0.13.0"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "fina_risk"
+module-root = "src"
 
 [dependency-groups]
 dev = [

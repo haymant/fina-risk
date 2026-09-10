@@ -171,10 +171,24 @@ wheels = [
 [[package]]
 name = "fina-risk"
 version = "0.1.0"
+source = { path = "wheels/fina_risk-0.1.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl" }
+dependencies = [
+    { name = "numpy" },
+]
+wheels = [
+    { filename = "fina_risk-0.1.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:93c76157c9e82fa8a88c59a4245a788ea4b79c74f6b5517f8593e9835c86afd5" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "numpy", specifier = ">=2.0,<3" }]
+
+[[package]]
+name = "fina-risk-mcp"
+version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "duckdb" },
-    { name = "fina-risk-cpp" },
+    { name = "fina-risk" },
     { name = "mcp" },
     { name = "numpy" },
     { name = "pyarrow" },
@@ -196,7 +210,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "duckdb", specifier = ">=1.1,<2" },
-    { name = "fina-risk-cpp", path = "wheels/fina_risk_cpp-0.1.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl" },
+    { name = "fina-risk", path = "wheels/fina_risk-0.1.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl" },
     { name = "mcp", specifier = ">=1.6,<2" },
     { name = "numpy", specifier = ">=2.0,<3" },
     { name = "pyarrow", specifier = ">=17,<22" },
@@ -214,20 +228,6 @@ dev = [
     { name = "ruff", specifier = ">=0.6,<1" },
     { name = "uvicorn", specifier = ">=0.30,<1" },
 ]
-
-[[package]]
-name = "fina-risk-cpp"
-version = "0.1.0"
-source = { path = "wheels/fina_risk_cpp-0.1.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl" }
-dependencies = [
-    { name = "numpy" },
-]
-wheels = [
-    { filename = "fina_risk_cpp-0.1.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:223255c5947ff7127834285be94e53d3c684ea39f53e8e0ba98be68ee8631623" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "numpy", specifier = ">=2.0,<3" }]
 
 [[package]]
 name = "h11"

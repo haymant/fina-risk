@@ -1,4 +1,4 @@
-name: Publish fina-risk-cpp
+name: Publish fina-risk
 
 on:
   push:
@@ -37,7 +37,7 @@ jobs:
       - name: Upload Distributions
         uses: actions/upload-artifact@v4
         with:
-          name: fina-risk-cpp-dist
+          name: fina-risk-dist
           path: dist/
 
   publish-to-testpypi:
@@ -58,7 +58,7 @@ jobs:
       - name: Download Distributions
         uses: actions/download-artifact@v4
         with:
-          name: fina-risk-cpp-dist
+          name: fina-risk-dist
           path: dist/
       - name: Publish to TestPyPI
         run: uv publish --index testpypi --trusted-publishing always
@@ -69,7 +69,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/project/fina-risk-cpp
+      url: https://pypi.org/project/fina-risk
     permissions:
       id-token: write
       contents: read
@@ -82,7 +82,7 @@ jobs:
       - name: Download Distributions
         uses: actions/download-artifact@v4
         with:
-          name: fina-risk-cpp-dist
+          name: fina-risk-dist
           path: dist/
       - name: Publish to PyPI
         run: uv publish --trusted-publishing always
