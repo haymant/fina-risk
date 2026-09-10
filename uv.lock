@@ -171,16 +171,13 @@ wheels = [
 [[package]]
 name = "fina-risk"
 version = "0.1.0"
-source = { path = "wheels/fina_risk-0.1.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
 ]
 wheels = [
-    { filename = "fina_risk-0.1.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:93c76157c9e82fa8a88c59a4245a788ea4b79c74f6b5517f8593e9835c86afd5" },
+    { url = "https://files.pythonhosted.org/packages/68/89/164ee8008484c058775c29377444acd9f5f3699e2326fd09bc0f3057b54d/fina_risk-0.1.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:eb891541b59796f93f5f2febe27f07f54bc5e6460c858156a661a4e9eb2172eb", size = 161639, upload-time = "2026-09-10T06:57:02.219Z" },
 ]
-
-[package.metadata]
-requires-dist = [{ name = "numpy", specifier = ">=2.0,<3" }]
 
 [[package]]
 name = "fina-risk-mcp"
@@ -210,7 +207,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "duckdb", specifier = ">=1.1,<2" },
-    { name = "fina-risk", path = "wheels/fina_risk-0.1.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl" },
+    { name = "fina-risk", specifier = ">=0.1.0" },
     { name = "mcp", specifier = ">=1.6,<2" },
     { name = "numpy", specifier = ">=2.0,<3" },
     { name = "pyarrow", specifier = ">=17,<22" },

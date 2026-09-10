@@ -62,7 +62,7 @@ jobs:
           name: fina-risk-dist
           path: dist/
       - name: Publish to TestPyPI
-        run: uv publish --index testpypi --trusted-publishing always
+        run: uv publish --publish-url https://test.pypi.org/legacy/ --trusted-publishing always
 
   publish-to-pypi:
     name: Publish to PyPI
