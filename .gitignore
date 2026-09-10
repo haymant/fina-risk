@@ -3,8 +3,13 @@ __pycache__/
 *.py[oc]
 build/
 dist/
-wheels/
 *.egg-info
+native/build/
+
+# Prebuilt manylinux native wheel shipped for Vercel (fina-core style)
+wheels/
+!wheels/
+!wheels/*.whl
 
 # Virtual environments
 .venv

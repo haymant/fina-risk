@@ -31,10 +31,112 @@ uv run ruff check .
 uv run mypy src
 ```
 
-The local reference path uses NumPy-batched correlated GBM and shared random
-numbers for spot bumps. It is intentionally the correctness baseline for a
-future QuantLib/XAD or GPU adapter; Vercel storage and GPU execution remain
-lower-priority adapters over the same DTOs.
+The local Python reference path uses NumPy-batched correlated GBM and shared
+random numbers for spot bumps. The `cpp/` branch adds a native non-MCP lane
+with the same DTO semantics, optional QuantLib C++/XAD C++ adapters, pybind11
+interop, and DuckDB/Arrow/Parquet/AWS S3 persistence boundaries. The Python
+MCP server remains the shared tool surface locally and on Vercel.
+
+## C++ performance lane
+
+Build the native benchmark with CMake. QuantLib, XAD, DuckDB, Arrow, AWS S3,
+and pybind11 are detected when installed; the deterministic native reference
+kernel keeps the branch buildable before those production libraries are provisioned.
+
+```bash
+cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release
+cmake --build cpp/build -j2
+./cpp/build/fina-risk-cpp-benchmark benchmark/instruments.json benchmark/market.json
+```
+
+The branch intentionally does not duplicate MCP tools in C++. The Python MCP
+server calls the C++ library through pybind11, preserving existing tool names
+and schemas while allowing native pricing/risk and OLAP execution.
+
+## E2E hybrid benchmark
+
+The native E2E target follows `skills/fina-risk/refs/sample-user-journey.md`:
+ingestion, structure compilation, shared paths, hybrid risk rows, Arrow/Parquet
+conversion, and a DuckDB OLAP query.
+
+```bash
+FINA_RISK_BENCHMARK_INSTRUMENTS=100000 \
+FINA_RISK_BENCHMARK_UNDERLYINGS=1200 \
+uv run python scripts/generate_benchmark.py
+cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release
+cmake --build cpp/build -j2
+uv run python scripts/run_cpp_e2e_olap.py \
+  benchmark/instruments.json benchmark/market.json /tmp/fina-risk-e2e \
+  --paths 1000
+```
+
+The current environment reports native method provenance honestly: when
+QuantLib C++ and XAD C++ are not discoverable, rows use
+`PATHWISE_NATIVE_FALLBACK`; when both are installed, the same target selects
+`AAD_FIXED_BRANCH` for smooth factors and explicit pathwise/CRN fallback for
+transitions. See [`benchmark/e2e-100k-1k-cpp-python.md`](benchmark/e2e-100k-1k-cpp-python.md)
+for the measured comparison.
+
+For a strict apples-to-apples parity run, generate one shared corpus and one
+shared path cube, then run both engines against those exact files:
+
+```bash
+FINA_RISK_BENCHMARK_INSTRUMENTS=100000 \
+FINA_RISK_BENCHMARK_OUT=/tmp/fina-risk-parity \
+uv run python scripts/generate_benchmark.py
+uv run python scripts/generate_shared_paths.py \
+  /tmp/fina-risk-parity/market.json /tmp/fina-risk-parity/paths.bin --paths 1000
+uv run python scripts/benchmark_augmented_parity.py \
+  /tmp/fina-risk-parity/instruments.json /tmp/fina-risk-parity/market.json \
+  /tmp/fina-risk-parity/paths.bin
+./cpp/build/fina-risk-cpp-parity \
+  /tmp/fina-risk-parity/instruments.json /tmp/fina-risk-parity/market.json \
+  /tmp/fina-risk-parity/paths.bin 1000
+```
+
+The exact shared-cube comparison and residual thresholds are recorded in
+[`benchmark/shared-parity-100k-1k.md`](benchmark/shared-parity-100k-1k.md).
+
+## Native XAD AAD build
+
+The optional AAD target uses the official XAD reverse-mode tape together with
+the QuantLib C++ development library. Build XAD and pass its install prefix to
+CMake:
+
+```bash
+git clone https://github.com/auto-differentiation/xad.git /tmp/xad
+cmake -S /tmp/xad -B /tmp/xad/build -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=/tmp/xad-install
+cmake --build /tmp/xad/build -j2
+cmake --install /tmp/xad/build
+sudo apt install libquantlib0-dev
+cmake -S cpp -B cpp/build-xad -DCMAKE_BUILD_TYPE=Release \
+  -DFINA_RISK_BUILD_XAD_AAD=ON -DCMAKE_PREFIX_PATH=/tmp/xad-install
+cmake --build cpp/build-xad --target fina-risk-cpp-aad -j2
+```
+
+The AAD target uses XAD fixed-branch reverse mode for smooth observations and
+falls back to CRN bump/revalue for branch transitions. On the 6-vCPU benchmark
+host, six OpenMP threads were the appropriate setting; eight provided no
+material improvement. See [`benchmark/xad-aad-cpu-profile.md`](benchmark/xad-aad-cpu-profile.md).
+
+AAD is an explicit runtime toggle and is **off by default**:
+
+```bash
+./cpp/build-xad/fina-risk-cpp-aad instruments.json market.json paths.bin 1000 --no-aad
+./cpp/build-xad/fina-risk-cpp-aad instruments.json market.json paths.bin 1000 --aad
+```
+
+The current shared path cube is terminal-only; it does **not** observe every
+day. The termsheet contains discrete event and coupon-period dates, including
+ten coupon range periods, but no daily simulated path cube. See
+[`benchmark/termsheet-observation-audit.md`](benchmark/termsheet-observation-audit.md).
+
+The faithful daily termsheet path is now available separately. It uses a shared
+weekday observation cube and applies cumulative EKI, global KO termination,
+range fixings, unpaid/memory carry, payment-date discounting, and daily central
+bump sensitivities in both Python and C++. See
+[`benchmark/daily-termsheet-parity.md`](benchmark/daily-termsheet-parity.md).
 
 ## Benchmark corpus
 
