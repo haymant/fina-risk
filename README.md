@@ -77,6 +77,26 @@ QuantLib C++ and XAD C++ are not discoverable, rows use
 transitions. See [`benchmark/e2e-100k-1k-cpp-python.md`](benchmark/e2e-100k-1k-cpp-python.md)
 for the measured comparison.
 
+For a strict apples-to-apples parity run, generate one shared corpus and one
+shared path cube, then run both engines against those exact files:
+
+```bash
+FINA_RISK_BENCHMARK_INSTRUMENTS=100000 \
+FINA_RISK_BENCHMARK_OUT=/tmp/fina-risk-parity \
+uv run python scripts/generate_benchmark.py
+uv run python scripts/generate_shared_paths.py \
+  /tmp/fina-risk-parity/market.json /tmp/fina-risk-parity/paths.bin --paths 1000
+uv run python scripts/benchmark_augmented_parity.py \
+  /tmp/fina-risk-parity/instruments.json /tmp/fina-risk-parity/market.json \
+  /tmp/fina-risk-parity/paths.bin
+./cpp/build/fina-risk-cpp-parity \
+  /tmp/fina-risk-parity/instruments.json /tmp/fina-risk-parity/market.json \
+  /tmp/fina-risk-parity/paths.bin 1000
+```
+
+The exact shared-cube comparison and residual thresholds are recorded in
+[`benchmark/shared-parity-100k-1k.md`](benchmark/shared-parity-100k-1k.md).
+
 ## Benchmark corpus
 
 The benchmark generator creates 2,000 heterogeneous three-leg instruments over
