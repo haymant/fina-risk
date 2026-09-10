@@ -5,6 +5,7 @@ build/
 dist/
 *.egg-info
 native/build/
+native/cpp/
 
 # Prebuilt manylinux native wheel shipped for Vercel (fina-core style)
 wheels/

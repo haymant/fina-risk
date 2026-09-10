@@ -18,8 +18,14 @@ FetchContent_MakeAvailable(nlohmann_json)
 
 find_package(pybind11 CONFIG REQUIRED)
 
-pybind11_add_module(fina_risk_cpp ../cpp/bindings/fina_risk_pybind.cpp ../cpp/src/fina_risk_cpp.cpp)
-target_include_directories(fina_risk_cpp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../cpp/include)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/cpp/src/fina_risk_cpp.cpp")
+  set(FINA_RISK_CPP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/cpp")
+else()
+  set(FINA_RISK_CPP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../cpp")
+endif()
+
+pybind11_add_module(fina_risk_cpp ${FINA_RISK_CPP_ROOT}/bindings/fina_risk_pybind.cpp ${FINA_RISK_CPP_ROOT}/src/fina_risk_cpp.cpp)
+target_include_directories(fina_risk_cpp PRIVATE ${FINA_RISK_CPP_ROOT}/include)
 target_link_libraries(fina_risk_cpp PRIVATE nlohmann_json::nlohmann_json)
 target_compile_definitions(fina_risk_cpp PRIVATE FINA_RISK_HAS_PYBIND11=1)
 

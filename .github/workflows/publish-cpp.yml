@@ -23,6 +23,7 @@ jobs:
 
       - name: Build cp312 manylinux wheel from native/
         run: |
+          cp -r cpp native/cpp
           cd native
           uvx --from cibuildwheel cibuildwheel --only cp312-manylinux_x86_64 --output-dir ../dist .
         env:
