@@ -301,6 +301,51 @@ def _execute(name: str, payload: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+_ALL_PAYLOAD_KEYS = (
+    "instrumentId",
+    "instrument",
+    "request",
+    "backend",
+    "bump",
+    "dataset",
+    "drillPath",
+    "driverId",
+    "endRow",
+    "evaluation_date",
+    "evaluationDate",
+    "execution",
+    "factors",
+    "filterModel",
+    "greeks",
+    "groupKeys",
+    "instruments",
+    "mcp_transport",
+    "paths",
+    "pipeline_id",
+    "pivotCols",
+    "pivotMode",
+    "pnl",
+    "query",
+    "records",
+    "reportVersion",
+    "root",
+    "rowGroupCols",
+    "seed",
+    "selection",
+    "sensitivities",
+    "shared",
+    "slice",
+    "sliceName",
+    "sortModel",
+    "startRow",
+    "state_backend",
+    "tableName",
+    "underlyings",
+    "valueCols",
+    "version",
+    "views",
+)
+
 for tool_name, description in ALL_TOOLS + [
     ("pricing_and_sensitivity", "Price a legacy request and generate CRN sensitivities."),
     (
@@ -310,8 +355,57 @@ for tool_name, description in ALL_TOOLS + [
     ),
 ]:
 
-    def _tool(context: dict[str, Any] | None = None, *, tool_name: str = tool_name) -> dict[str, Any]:
-        return _execute(tool_name, context)
+    def _tool(
+        instrumentId: Any = None,
+        instrument: Any = None,
+        request: Any = None,
+        backend: Any = None,
+        bump: Any = None,
+        dataset: Any = None,
+        drillPath: Any = None,
+        driverId: Any = None,
+        endRow: Any = None,
+        evaluation_date: Any = None,
+        evaluationDate: Any = None,
+        execution: Any = None,
+        factors: Any = None,
+        filterModel: Any = None,
+        greeks: Any = None,
+        groupKeys: Any = None,
+        instruments: Any = None,
+        mcp_transport: Any = None,
+        paths: Any = None,
+        pipeline_id: Any = None,
+        pivotCols: Any = None,
+        pivotMode: Any = None,
+        pnl: Any = None,
+        query: Any = None,
+        records: Any = None,
+        reportVersion: Any = None,
+        root: Any = None,
+        rowGroupCols: Any = None,
+        seed: Any = None,
+        selection: Any = None,
+        sensitivities: Any = None,
+        shared: Any = None,
+        slice: Any = None,
+        sliceName: Any = None,
+        sortModel: Any = None,
+        startRow: Any = None,
+        state_backend: Any = None,
+        tableName: Any = None,
+        underlyings: Any = None,
+        valueCols: Any = None,
+        version: Any = None,
+        views: Any = None,
+        *,
+        tool_name: str = tool_name,
+    ) -> dict[str, Any]:
+        provided: dict[str, Any] = {}
+        for key in _ALL_PAYLOAD_KEYS:
+            if locals()[key] is not None:
+                provided[key] = locals()[key]
+        return _execute(tool_name, provided)
 
     _tool.__name__ = tool_name
     _tool.__doc__ = description
