@@ -231,6 +231,14 @@ smooth fixed-branch factors and retains pathwise/CRN fallback for transitions.
 The 100k-record benchmark uses 1,000 paths when requested and reports ingestion,
 compile, path, risk, serialization, and OLAP timings separately.
 
+The terminal shared-cube benchmark is not the termsheet lifecycle benchmark.
+The faithful daily path is implemented by `daily_termsheet.py` and
+`fina-risk-cpp-daily-termsheet`: it consumes weekday observation paths, applies
+cumulative EKI, global KO termination, per-period range fixing counts, unpaid
+fixing/memory carry, payment-date discounting, and central-bump daily Greeks.
+The current schedule is weekday-based; production fixing eligibility should use
+the QuantLib NYSE calendar before claiming exact exchange-calendar parity.
+
 Run the native lane locally:
 
 ```bash

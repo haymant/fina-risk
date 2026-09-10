@@ -132,6 +132,12 @@ day. The termsheet contains discrete event and coupon-period dates, including
 ten coupon range periods, but no daily simulated path cube. See
 [`benchmark/termsheet-observation-audit.md`](benchmark/termsheet-observation-audit.md).
 
+The faithful daily termsheet path is now available separately. It uses a shared
+weekday observation cube and applies cumulative EKI, global KO termination,
+range fixings, unpaid/memory carry, payment-date discounting, and daily central
+bump sensitivities in both Python and C++. See
+[`benchmark/daily-termsheet-parity.md`](benchmark/daily-termsheet-parity.md).
+
 ## Benchmark corpus
 
 The benchmark generator creates 2,000 heterogeneous three-leg instruments over
