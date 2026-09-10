@@ -120,6 +120,18 @@ falls back to CRN bump/revalue for branch transitions. On the 6-vCPU benchmark
 host, six OpenMP threads were the appropriate setting; eight provided no
 material improvement. See [`benchmark/xad-aad-cpu-profile.md`](benchmark/xad-aad-cpu-profile.md).
 
+AAD is an explicit runtime toggle and is **off by default**:
+
+```bash
+./cpp/build-xad/fina-risk-cpp-aad instruments.json market.json paths.bin 1000 --no-aad
+./cpp/build-xad/fina-risk-cpp-aad instruments.json market.json paths.bin 1000 --aad
+```
+
+The current shared path cube is terminal-only; it does **not** observe every
+day. The termsheet contains discrete event and coupon-period dates, including
+ten coupon range periods, but no daily simulated path cube. See
+[`benchmark/termsheet-observation-audit.md`](benchmark/termsheet-observation-audit.md).
+
 ## Benchmark corpus
 
 The benchmark generator creates 2,000 heterogeneous three-leg instruments over

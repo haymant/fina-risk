@@ -76,6 +76,15 @@ fallback. Do not report the fallback observations as AAD. For the six-vCPU
 benchmark worker, use six OpenMP threads; eight was measured and provided no
 material improvement.
 
+The AAD executable has an explicit runtime switch and defaults to AAD off:
+`--no-aad` uses CRN bump/revalue for all sensitivities, while `--aad` enables
+XAD fixed-branch reverse mode plus the transition fallback. The current shared
+benchmark path cube is terminal-only. It does not claim daily termsheet
+observation: the fixture supplies discrete KI/event dates and ten coupon period
+end dates, but not a daily path cube. Daily EKI/range-memory parity requires a
+path-by-observation-date cube and lifecycle-state evolution before it can be
+enabled.
+
 Never call `QuantLib.Option.delta()` or an FD loop "AAD". Background: `fina-pricer/docs/aad_research.md` and `fina-pricer/skills/fina-pricer/references/xad_quantlib_notes.md`.
 
 ## MCP tool groups
