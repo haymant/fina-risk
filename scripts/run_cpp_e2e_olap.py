@@ -39,11 +39,14 @@ def main() -> None:
         f"WITH positions AS (SELECT instrument_id, MAX(base_pv) AS base_pv "
         f"FROM read_parquet('{output / 'risk_wide.parquet'}') GROUP BY instrument_id) "
         f"SELECT (SELECT COUNT(*) FROM read_parquet('{output / 'risk_wide.parquet'}')) AS rows, "
-        f"SUM(base_pv) AS pv_sum, (SELECT SUM(delta_dollar) FROM read_parquet('{output / 'risk_wide.parquet'}')) AS dollar_delta_sum "
+        f"SUM(base_pv) AS pv_sum, "
+        f"(SELECT SUM(delta_dollar) FROM read_parquet('{output / 'risk_wide.parquet'}')) AS dollar_delta_sum "
         f"FROM positions"
     ).fetchone()
     audit = con.execute(
-        f"SELECT method, COUNT(*) AS rows FROM read_parquet('{output / 'risk_long.parquet'}') GROUP BY method ORDER BY method"
+        f"SELECT method, COUNT(*) AS rows "
+        f"FROM read_parquet('{output / 'risk_long.parquet'}') "
+        f"GROUP BY method ORDER BY method"
     ).fetchall()
     query_seconds = time.perf_counter() - query_started
     report["storage"].update(

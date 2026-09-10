@@ -60,7 +60,10 @@ def price_daily_termsheet(
     terminal_worst = worst[:, -1]
     strike = float(deal.get("knockInStar", {}).get("strikeKI2", deal.get("strike", 0.78)))
     put_payoff = np.where(ki_hit & ~ko_hit, np.maximum(strike - terminal_worst, 0.0), 0.0)
-    put_df = math.exp(-float(market.get("discCurves", [{}])[0].get("curve", [{"rate": 0.0}])[0].get("rate", 0.0)) * year_fraction(evaluation, expiry))
+    disc_rate = float(
+        market.get("discCurves", [{}])[0].get("curve", [{"rate": 0.0}])[0].get("rate", 0.0)
+    )
+    put_df = math.exp(-disc_rate * year_fraction(evaluation, expiry))
     put = float(put_df * put_payoff.mean())
 
     rg = deal.get("RGACCLKO", {})
@@ -94,7 +97,10 @@ def price_daily_termsheet(
         alive_through = ko_step > end_index
         accrued_fraction = np.minimum((future_fixings + memory) / effective_total, 1.0)
         amount = np.where(alive_through, notional * rate * accrued_fraction, 0.0)
-        payment_df = math.exp(-float(market.get("discCurves", [{}])[0].get("curve", [{"rate": 0.0}])[0].get("rate", 0.0)) * year_fraction(evaluation, payment))
+        payment_disc_rate = float(
+            market.get("discCurves", [{}])[0].get("curve", [{"rate": 0.0}])[0].get("rate", 0.0)
+        )
+        payment_df = math.exp(-payment_disc_rate * year_fraction(evaluation, payment))
         coupon_paths += amount * payment_df
         missed = np.maximum(effective_total - future_fixings, 0.0)
         memory = np.where(alive_through & (future_fixings < effective_total), missed, 0.0)
@@ -115,5 +121,9 @@ def price_daily_termsheet(
         daily_observations=int(dates.size),
         coupon_fixings=fixings_report,
         memory_carry=memory_report,
-        legs=[{"leg_name": "PUT", "multiplier": -1, "pv": -put}, {"leg_name": "FUNDING", "multiplier": 1, "pv": funding}, {"leg_name": "COUPON", "multiplier": 1, "pv": coupon}],
+        legs=[
+            {"leg_name": "PUT", "multiplier": -1, "pv": -put},
+            {"leg_name": "FUNDING", "multiplier": 1, "pv": funding},
+            {"leg_name": "COUPON", "multiplier": 1, "pv": coupon},
+        ],
     )

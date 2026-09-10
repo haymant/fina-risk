@@ -33,7 +33,8 @@ def main() -> None:
         deltas = np.zeros(len(idx), dtype=np.float64)
         gammas = np.zeros(len(idx), dtype=np.float64)
         for k in range(len(idx)):
-            up = ratio.copy(); down = ratio.copy()
+            up = ratio.copy()
+            down = ratio.copy()
             up[:, k] *= 1.0 + args.bump
             down[:, k] *= 1.0 - args.bump
             up_pv = np.maximum(strike - up.min(axis=1), 0.0).mean()
@@ -51,7 +52,25 @@ def main() -> None:
         forecast_sum += forecast
         actual_sum += actual
     finished = time.perf_counter()
-    print(json.dumps({"instruments": len(instruments), "underlyings": len(spots), "paths": int(terminal.shape[0]), "pv_checksum": pv_sum, "delta_checksum": delta_sum, "delta_dollar_checksum": delta_dollar_sum, "gamma_checksum": gamma_sum, "taylor_forecast_checksum": forecast_sum, "taylor_actual_checksum": actual_sum, "taylor_unexplained_checksum": actual_sum - forecast_sum, "elapsed_seconds": finished - started, "instruments_per_second": len(instruments) / max(finished - started, 1e-12), "shared_path_cube": str(args.paths), "stage_ingestion_seconds": ingestion - started, "stage_compute_seconds": finished - ingestion, "method": "CRN_BUMP_REVALUE_WITH_PATHWISE_DELTA"}, indent=2))
+    summary = {
+        "instruments": len(instruments),
+        "underlyings": len(spots),
+        "paths": int(terminal.shape[0]),
+        "pv_checksum": pv_sum,
+        "delta_checksum": delta_sum,
+        "delta_dollar_checksum": delta_dollar_sum,
+        "gamma_checksum": gamma_sum,
+        "taylor_forecast_checksum": forecast_sum,
+        "taylor_actual_checksum": actual_sum,
+        "taylor_unexplained_checksum": actual_sum - forecast_sum,
+        "elapsed_seconds": finished - started,
+        "instruments_per_second": len(instruments) / max(finished - started, 1e-12),
+        "shared_path_cube": str(args.paths),
+        "stage_ingestion_seconds": ingestion - started,
+        "stage_compute_seconds": finished - ingestion,
+        "method": "CRN_BUMP_REVALUE_WITH_PATHWISE_DELTA",
+    }
+    print(json.dumps(summary, indent=2))
 
 
 if __name__ == "__main__":

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import struct
 from pathlib import Path
 
 import numpy as np
@@ -25,8 +24,16 @@ def main() -> None:
     spots = np.asarray([u["spot"] for u in underlyings], dtype=np.float32)
     terminal = spots[None, :] * np.exp(factor_terminal @ loadings.T)
     terminal.astype(np.float32, copy=False).tofile(args.output)
-    Path(args.output + ".meta.json").write_text(json.dumps({"paths": args.paths, "underlyings": n, "factors": factors, "seed": args.seed}, indent=2) + "\n")
-    print(json.dumps({"output": args.output, "paths": args.paths, "underlyings": n, "factors": factors, "bytes": int(terminal.nbytes)}, indent=2))
+    meta = {"paths": args.paths, "underlyings": n, "factors": factors, "seed": args.seed}
+    Path(args.output + ".meta.json").write_text(json.dumps(meta, indent=2) + "\n")
+    summary = {
+        "output": args.output,
+        "paths": args.paths,
+        "underlyings": n,
+        "factors": factors,
+        "bytes": int(terminal.nbytes),
+    }
+    print(json.dumps(summary, indent=2))
 
 
 if __name__ == "__main__":
