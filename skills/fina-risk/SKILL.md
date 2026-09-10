@@ -68,6 +68,14 @@ The `cpp/` implementation is the performance lane and deliberately owns no MCP t
 4. **pybind11** exposes typed pricing, risk, P&L, and persistence functions to Python. It does not expose MCP tools; the Python server continues to share the exact tool names and schemas.
 5. The CMake build treats these libraries as optional for local bootstrap and Vercel packaging. When present, `FINA_RISK_HAS_QUANTLIB_XAD` and `FINA_RISK_HAS_DUCKDB` select the production adapters; the deterministic native reference kernel remains available without them.
 
+The optional `FINA_RISK_BUILD_XAD_AAD` target now builds an actual XAD
+`xad::adj<double>` reverse-mode tape and links the QuantLib C++ library. Smooth
+fixed-branch observations use the tape; worst-of, payoff-kink, and branch
+transition observations are explicitly classified and use CRN bump/revalue
+fallback. Do not report the fallback observations as AAD. For the six-vCPU
+benchmark worker, use six OpenMP threads; eight was measured and provided no
+material improvement.
+
 Never call `QuantLib.Option.delta()` or an FD loop "AAD". Background: `fina-pricer/docs/aad_research.md` and `fina-pricer/skills/fina-pricer/references/xad_quantlib_notes.md`.
 
 ## MCP tool groups

@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(fina_risk_cpp VERSION 0.1.0 LANGUAGES CXX)
 
+option(FINA_RISK_BUILD_XAD_AAD "Build the native XAD reverse-mode AAD benchmark" OFF)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -48,10 +50,24 @@ add_executable(fina-risk-cpp-parity apps/parity_benchmark.cpp)
 target_link_libraries(fina-risk-cpp-parity PRIVATE fina_risk_core)
 target_compile_options(fina-risk-cpp-parity PRIVATE $<$<CONFIG:Release>:-O3;-march=native;-mtune=native;-ffast-math>)
 
+if(FINA_RISK_BUILD_XAD_AAD)
+  find_package(XAD CONFIG REQUIRED)
+  find_path(QUANTLIB_INCLUDE_DIR ql/quantlib.hpp REQUIRED)
+  find_library(QUANTLIB_LIBRARY QuantLib REQUIRED)
+  add_executable(fina-risk-cpp-aad apps/aad_benchmark.cpp)
+  target_include_directories(fina-risk-cpp-aad PRIVATE ${QUANTLIB_INCLUDE_DIR})
+  target_link_libraries(fina-risk-cpp-aad PRIVATE XAD::xad ${QUANTLIB_LIBRARY})
+  target_compile_definitions(fina-risk-cpp-aad PRIVATE FINA_RISK_HAS_QUANTLIB_XAD=1)
+  target_compile_options(fina-risk-cpp-aad PRIVATE $<$<CONFIG:Release>:-O3;-march=native;-mtune=native;-ffast-math>)
+endif()
+
 if (pybind11_FOUND)
   pybind11_add_module(fina_risk_cpp bindings/fina_risk_pybind.cpp)
   target_compile_definitions(fina_risk_cpp PRIVATE FINA_RISK_HAS_PYBIND11=1)
   target_link_libraries(fina_risk_cpp PRIVATE fina_risk_core)
 endif()
 
+if(FINA_RISK_BUILD_XAD_AAD)
+  install(TARGETS fina-risk-cpp-aad RUNTIME DESTINATION bin)
+endif()
 install(TARGETS fina-risk-cpp-benchmark fina-risk-cpp-e2e fina-risk-cpp-parity RUNTIME DESTINATION bin)

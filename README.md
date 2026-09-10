@@ -97,6 +97,29 @@ uv run python scripts/benchmark_augmented_parity.py \
 The exact shared-cube comparison and residual thresholds are recorded in
 [`benchmark/shared-parity-100k-1k.md`](benchmark/shared-parity-100k-1k.md).
 
+## Native XAD AAD build
+
+The optional AAD target uses the official XAD reverse-mode tape together with
+the QuantLib C++ development library. Build XAD and pass its install prefix to
+CMake:
+
+```bash
+git clone https://github.com/auto-differentiation/xad.git /tmp/xad
+cmake -S /tmp/xad -B /tmp/xad/build -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=/tmp/xad-install
+cmake --build /tmp/xad/build -j2
+cmake --install /tmp/xad/build
+sudo apt install libquantlib0-dev
+cmake -S cpp -B cpp/build-xad -DCMAKE_BUILD_TYPE=Release \
+  -DFINA_RISK_BUILD_XAD_AAD=ON -DCMAKE_PREFIX_PATH=/tmp/xad-install
+cmake --build cpp/build-xad --target fina-risk-cpp-aad -j2
+```
+
+The AAD target uses XAD fixed-branch reverse mode for smooth observations and
+falls back to CRN bump/revalue for branch transitions. On the 6-vCPU benchmark
+host, six OpenMP threads were the appropriate setting; eight provided no
+material improvement. See [`benchmark/xad-aad-cpu-profile.md`](benchmark/xad-aad-cpu-profile.md).
+
 ## Benchmark corpus
 
 The benchmark generator creates 2,000 heterogeneous three-leg instruments over
