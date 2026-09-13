@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import glob as globmod
 import itertools
 import json
 import os
@@ -10,8 +11,78 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from .gcs import configure_duckdb_object_store, object_store_configured, object_store_status
+from .storage import StorageConfig, get_storage_config
+from .storage import storage_status as store_status
+
 DEFAULT_ROOT = Path(os.getenv("FINA_RISK_OLAP_ROOT", "/tmp/fina-risk-olap"))
 ALLOWED_AGGREGATES = {"sum", "avg", "min", "max", "count", "first", "last"}
+
+
+def _is_object_store(cfg: StorageConfig) -> bool:
+    if cfg.store in ("s3", "gcs"):
+        return True
+    if cfg.store == "auto":
+        return bool(cfg.effective_bucket)
+    return False
+
+
+def _object_scheme(cfg: StorageConfig, bucket: str) -> str:
+    """Choose a DuckDB-readable scheme for the configured bucket.
+
+    GCS interoperability credentials use the S3-compatible endpoint, which
+    DuckDB reads through the ``s3://`` scheme (the tested fina-olap path).
+    """
+    if bucket.startswith("gs://"):
+        return "gs://"
+    if bucket.startswith("s3://"):
+        return "s3://"
+    if os.getenv("S3_API_KEY"):
+        return "s3://"
+    return "gs://" if cfg.store == "gcs" else "s3://"
+
+
+def _base_location(cfg: StorageConfig) -> tuple[str, bool]:
+    """Return ``(base, is_object)`` — a local root or ``scheme://bucket/prefix``."""
+    if _is_object_store(cfg):
+        raw = (cfg.effective_bucket or "").rstrip("/")
+        scheme = _object_scheme(cfg, raw)
+        bucket = raw.removeprefix("s3://").removeprefix("gs://")
+        prefix = cfg.default_path.strip("/")
+        base = f"{scheme}{bucket}"
+        if prefix:
+            base = f"{base}/{prefix}"
+        return base, True
+    return cfg.local_root, False
+
+
+def _effective_hive(cfg: StorageConfig, is_object: bool) -> bool:
+    if cfg.hive_partitioning is not None:
+        return cfg.hive_partitioning
+    return is_object
+
+
+def resolve_dataset_source(dataset: str, root: Path | str | None = None) -> tuple[str, bool]:
+    """Resolve the DuckDB source glob + hive flag for a dataset under the store config."""
+    cfg = get_storage_config()
+    glob_pat = cfg.glob_for(dataset)
+    if root is not None:
+        return f"{Path(root).as_posix().rstrip('/')}/{glob_pat}", _effective_hive(cfg, False)
+    base, is_object = _base_location(cfg)
+    return f"{base.rstrip('/')}/{glob_pat}", _effective_hive(cfg, is_object)
+
+
+def _write_target(dataset: str, root: Path | str | None = None) -> tuple[str, bool]:
+    """Resolve where a dataset is written (and whether it is an object-store URI)."""
+    cfg = get_storage_config()
+    directory_layout = "/" in cfg.glob_for(dataset)
+    if root is not None:
+        base, is_object = Path(root).as_posix(), False
+    else:
+        base, is_object = _base_location(cfg)
+    if directory_layout:
+        return f"{base.rstrip('/')}/{dataset}/part-000.parquet", is_object
+    return f"{base.rstrip('/')}/{dataset}.parquet", is_object
 
 
 def _ident(value: str) -> str:
@@ -24,6 +95,12 @@ def _source_path(dataset: str, root: Path) -> Path:
     if dataset not in {"risk_wide", "risk_long"}:
         raise ValueError("dataset must be risk_wide or risk_long")
     return root / f"{dataset}.parquet"
+
+
+def _local_source_exists(source: str) -> bool:
+    if globmod.has_magic(source):
+        return bool(globmod.glob(source))
+    return Path(source).exists()
 
 
 def _filter_sql(field: str, item: dict[str, Any], params: list[Any]) -> str:
@@ -87,36 +164,76 @@ def _agg(expr: str, spec: dict[str, Any]) -> str:
     return f"{fn.upper()}({_ident(expr)}) AS {_ident(expr)}"
 
 
-def _read_relation(con: duckdb.DuckDBPyConnection, dataset: str, root: Path) -> str:
-    path = _source_path(dataset, root)
-    if not path.exists():
-        raise FileNotFoundError(f"OLAP dataset not found: {path}")
-    escaped_path = str(path).replace("'", "''")
-    con.execute(f"CREATE OR REPLACE TEMP VIEW olap_source AS SELECT * FROM read_parquet('{escaped_path}')")
+def _read_relation(con: duckdb.DuckDBPyConnection, dataset: str, root: Path | str | None) -> str:
+    if dataset not in {"risk_wide", "risk_long"}:
+        raise ValueError("dataset must be risk_wide or risk_long")
+    source, hive = resolve_dataset_source(dataset, root)
+    if source.startswith(("s3://", "gs://", "http://", "https://")):
+        if object_store_configured():
+            configure_duckdb_object_store(con)
+    elif not _local_source_exists(source):
+        raise FileNotFoundError(f"OLAP dataset not found: {source}")
+    escaped_path = source.replace("'", "''")
+    con.execute(
+        f"CREATE OR REPLACE TEMP VIEW olap_source AS "
+        f"SELECT * FROM read_parquet('{escaped_path}', hive_partitioning = {str(bool(hive)).upper()})"
+    )
     return "olap_source"
 
 
+def _write_table(table: pa.Table, target: str, is_object: bool) -> None:
+    if is_object or target.startswith(("s3://", "gs://")):
+        con = duckdb.connect()
+        try:
+            if object_store_configured():
+                configure_duckdb_object_store(con)
+            con.register("risk_out", table)
+            escaped = target.replace("'", "''")
+            con.execute(f"COPY (SELECT * FROM risk_out) TO '{escaped}' (FORMAT PARQUET, COMPRESSION ZSTD)")
+        finally:
+            con.close()
+    else:
+        path = Path(target)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(table, path, compression="zstd")
+
+
 def write_risk_store(
-    views: list[dict[str, Any]], *, root: Path | str = DEFAULT_ROOT, metadata: dict[str, Any] | None = None
+    views: list[dict[str, Any]],
+    *,
+    root: Path | str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Persist atomic wide factor components and long method observations as Parquet."""
-    root = Path(root)
-    root.mkdir(parents=True, exist_ok=True)
+    """Persist atomic wide factor components and long method observations as Parquet.
+
+    Without an explicit ``root`` the shared store config decides the destination
+    (local root, or GCS/S3 bucket + prefix), so fina-olap can read the same data.
+    """
+    cfg = get_storage_config()
     wide = [row for view in views for row in view.get("wide", [])]
     long_rows = [row for view in views for row in view.get("long", [])]
     if not wide and not long_rows:
         raise ValueError("views contains no risk rows")
+    written: dict[str, str] = {}
     for name, rows in (("risk_wide", wide), ("risk_long", long_rows)):
         if rows:
             table = pa.Table.from_pylist(rows)
-            pq.write_table(table, _source_path(name, root), compression="zstd")
+            target, is_object = _write_target(name, root)
+            _write_table(table, target, is_object)
+            written[name] = target
+    # Local manifest lives beside a local root (skipped for object stores).
+    base, is_object = _base_location(cfg) if root is None else (Path(root).as_posix(), False)
     manifest = {
         "schema_version": "risk-store.v1",
         "datasets": {"risk_wide": len(wide), "risk_long": len(long_rows)},
+        "targets": written,
         "metadata": metadata or {},
     }
-    (root / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
-    return {"status": "ok", "root": str(root), **manifest}
+    if not is_object:
+        manifest_path = Path(base) / "manifest.json"
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(json.dumps(manifest, indent=2, default=str))
+    return {"status": "ok", "root": base, **manifest}
 
 
 def _build_query(
@@ -201,10 +318,13 @@ def _build_query(
     return sql, params, pivot_fields
 
 
-def query_ssrm(payload: dict[str, Any], *, root: Path | str = DEFAULT_ROOT) -> dict[str, Any]:
-    """Execute an AG Grid SSRM request against normalized Parquet with DuckDB."""
+def query_ssrm(payload: dict[str, Any], *, root: Path | str | None = None) -> dict[str, Any]:
+    """Execute an AG Grid SSRM request against normalized Parquet with DuckDB.
+
+    With no explicit ``root`` the source is resolved from the shared store config
+    (local root or GCS/S3 bucket + prefix/partition glob).
+    """
     dataset = payload.get("dataset", "risk_wide")
-    root = Path(root)
     con = duckdb.connect()
     try:
         relation = _read_relation(con, dataset, root)
@@ -227,16 +347,22 @@ def query_ssrm(payload: dict[str, Any], *, root: Path | str = DEFAULT_ROOT) -> d
     }
 
 
-def storage_status(*, root: Path | str = DEFAULT_ROOT) -> dict[str, Any]:
-    root = Path(root)
-    manifest_path = root / "manifest.json"
-    manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+def storage_status(*, root: Path | str | None = None) -> dict[str, Any]:
+    """Storage diagnostics: shared store config + the local risk-store manifest."""
+    cfg = get_storage_config()
+    base, is_object = (Path(root).as_posix(), False) if root is not None else _base_location(cfg)
+    manifest: dict[str, Any] = {}
+    if not is_object:
+        manifest_path = Path(base) / "manifest.json"
+        manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
     return {
         "status": "ok",
         "backend": "duckdb_arrow_parquet",
-        "root": str(root),
+        "root": None if is_object else base,
         "manifest": manifest,
         "s3_compatible": bool(os.getenv("S3_ENDPOINT")),
+        "store": store_status(),
+        "object_store": object_store_status(),
     }
 
 
@@ -245,10 +371,13 @@ def resolve_s3_uri(payload: dict[str, Any]) -> str:
     slice_name = payload.get("sliceName") or payload.get("slice")
     if not version or not slice_name:
         raise ValueError("reportVersion/version and sliceName/slice are required")
-    bucket = os.getenv("S3_BUCKET_NAME", "")
-    prefix = os.getenv("S3_PATH_PREFIX", "").strip("/")
+    cfg = get_storage_config()
+    raw_bucket = (cfg.effective_bucket or "").rstrip("/")
+    scheme = _object_scheme(cfg, raw_bucket)
+    bucket = raw_bucket.removeprefix("s3://").removeprefix("gs://")
+    prefix = (cfg.default_path or os.getenv("S3_PATH_PREFIX", "")).strip("/")
     table = payload.get("tableName", "risk_wide")
-    parts = [f"s3://{bucket}", prefix, str(version), str(slice_name), f"{table}*.parquet"]
+    parts = [f"{scheme}{bucket}", prefix, str(version), str(slice_name), f"{table}*.parquet"]
     return "/".join(x.strip("/") for x in parts if x)
 
 

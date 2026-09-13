@@ -106,8 +106,8 @@ Load only the subsystem spec you need from `refs/*`; validate objects against `s
 | 11 | PnL | `refs/pnl/*` | forecast/explain_pnl, taylor_decomposition | PnLForecast, PnLExplain, TaylorBreakdown |
 | 12 | Portfolio | `refs/portfolio/*` | aggregate_portfolio, net_sensitivities, portfolio_scenarios | PortfolioView, PortfolioRisk |
 | 13 | Scheduler | `refs/scheduler/*` | submit/cancel/rebalance/inspect_job | JobRequest, JobStatus |
-| 14 | OLAP / Storage | `refs/olap/*` | write_risk_store, olap_query, storage_status, resolve_s3_dataset, link_olap_views | RiskStoreManifest, SSRMQuery, LinkedViewState |
-| 15 | E2E Pipeline | `refs/sample-user-journey.md` | ingest_instruments, ingest_market_data, read_risk_metadata, read_dashboard_metadata, plan_pnl_forecast, trigger_pnl_forecast, pipeline_state | InstrumentSnapshot, MarketSnapshot, ExecutionPlan, PipelineState |
+| 14 | OLAP / Storage | `refs/olap/*` | write_risk_store, olap_query, storage_status, resolve_s3_dataset, link_olap_views, store_config, store_configure, store_resolve | RiskStoreManifest, SSRMQuery, LinkedViewState |
+| 15 | ETL / Pipeline | `refs/sample-user-journey.md` | augment_termsheet, compile_pricing_requests, run_etl_task, run_risk_task, ingest_instruments, ingest_market_data, read_risk_metadata, read_dashboard_metadata, plan_pnl_forecast, trigger_pnl_forecast, pipeline_state | InstrumentSnapshot, MarketSnapshot, PricingRequest, ExecutionPlan, PipelineState |
 
 The **executable reference implementation** of these tools is the `fina-pricer` riskcube MCP server, which exposes `pricing_and_sensitivity`, `scenario_*`, `olap_query`, `gcs_read_parquet`, `storage_status`, and `set_storage_mode`, with typed schemas in `fina-pricer/skills/fina-pricer/schema/`.
 
@@ -120,6 +120,25 @@ For an end-to-end portfolio P&L request, agents should follow `refs/sample-user-
 For layman explanations of structure reuse, correlation-factor compression, and the boundary between fixed-branch AAD, smoothed AAD, and CRN fallback, load `refs/uniqueness-factor-compression-and-aad.md`.
 
 The benchmark hybrid lane uses cached structure-level method selection: XAD `AAD_FIXED_BRANCH` for eligible stable spot delta, vega, bucket vega, IRPV01, FX delta, and skew paths; `PATHWISE` fallback in transition bands; optional explicitly labeled `AAD_SMOOTHED`; and CRN bump fallback for unsupported gamma and cross-factor components.
+
+**Sizing benchmark** — same kernel scope as the production `risk_batch` scheduler task but without persistence or risk rows: `run_risk_task(mode="benchmark", instruments=N, underlyings=…, paths=…)` over MCP, or the sweep script `scripts/benchmark_scale.py --paths 1000`. Latest wall-clock sweep (numpy engine, 1k paths, hybrid AAD + CRN bump for gamma):
+
+| instruments | underlyings | elapsed | throughput |
+| --- | --- | --- | --- |
+| 2,000 | 500 | 12.63 s | 158 /s |
+| 15,000 | 1,200 | 21.56 s | 696 /s |
+| 40,000 | 1,200 | 38.92 s | 1,028 /s |
+| 100,000 | 1,200 | 79.13 s | 1,264 /s |
+
+Throughput scales because the 1,000 unique payoff structures (AAD method selection + market-AAD caches) amortize across instruments; i.e. per-instrument cost falls as the portfolio grows. Rerun with `uv --directory fina-risk run python scripts/benchmark_scale.py --paths 1000 --out benchmark/scale_results.json`.
+
+**C++ parity lane** — `run_cpp_parity_benchmark` (MCP `benchmark_portfolio` `backend="cpp"`, or `scripts/benchmark_scale.py --backend cpp`). AAD is disabled by design: `aad_engine="disabled"`, method `CRN_BUMP_REVALUE_WITH_PATHWISE_DELTA`, delta+gamma via central bumps on the shared terminal cube + Taylor-2 forecast, plus the same serialization corpus the numpy lane uses. Native `fina_risk_cpp` pybind is used when present, else an exact `python_mirror`. Result for **100k instruments × 100k unique payoff structures × 3,000 paths** (native, 1,200 underlyings, 12 factors, seed 20260909):
+
+| lane | elapsed (wall) | kernel-only | throughput | PV dump | Δ/Γ checksum |
+| --- | --- | --- | --- | --- | --- |
+| cpp_native (AAD off) | 18.90 s | 16.76 s | 5,967 /s | 67,318.50 | −108.931 |
+
+For contrast the numpy hybrid-AAD 1k-path full-eight-greek lane is ≈ 79 s @100k. Because the parity lane prices every instrument independently (per-instrument bump-revalue, no structure-level cache), its throughput is flat in `unique_structure_count` — the 100k-structure corpus only widens the `basket_idx`/strike arrays, not the compute.
 
 ## Canonical DTO hierarchy
 
@@ -149,6 +168,29 @@ Every object validates against its JSON Schema in `schema/`:
 | Pipeline | `schema/pipeline-state.schema.json`, `schema/execution-plan.schema.json`, `schema/storage-boundaries.schema.json` |
 
 Risk report cells carry the originating RFK, measure, value, method (`AAD`/`PATHWISE`/`LRM`/`FD`) and fallback reason.
+
+### Shared store configuration (fina-olap compatible)
+
+fina-risk and fina-olap resolve the **same** env vars, so a risk-generation run
+and an OLAP analysis can share one local directory or GCS/S3 bucket + partition
+layout (hive convention):
+
+| Env var | Purpose | Aliases |
+|---|---|---|
+| `FINA_OLAP_STORE` | `local` / `s3` / `gcs` / `auto` | — |
+| `FINA_OLAP_PARQUET_ROOT` | local Parquet root | `OLAP_PARQUET_ROOT`, `DATA_DIR`, `FINA_RISK_OLAP_ROOT` |
+| `FINA_OLAP_BUCKET` | object-store bucket | `S3_BUCKET_NAME`, `AWS_BUCKET` |
+| `FINA_OLAP_PATH` | prefix under the bucket | `S3_PATH_ENV` |
+| `S3_PATH_TEMPLATE` | `{bucket}/{s3Path}/{version}/{slice}/{tableName}*` | — |
+| `FINA_OLAP_PARTITION_GLOB` | table glob, e.g. `{tableName}/region=*/date=*/*.parquet` | — |
+| `FINA_OLAP_HIVE_PARTITIONING` | `1/0/true/false` (default on for s3/gcs) | — |
+
+At runtime the same setting is exposed over MCP with the same tool names as
+fina-olap: `store_config` (read), `store_configure` (set `store` /
+`parquet_root` / `bucket` / `path` / `partition_glob` / `hive_partitioning`,
+or `clear=true`), and `store_resolve` (preview the resolved source + hive flag).
+`write_risk_store`/`olap_query` then default to that resolved location.
+
 
 ## Executable and testable
 

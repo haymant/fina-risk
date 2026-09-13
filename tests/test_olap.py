@@ -67,3 +67,42 @@ def test_linked_view_driver_and_status(tmp_path: Path) -> None:
     state = link_view_state({"views": [{"id": "risk", "dataset": "risk_wide"}], "shared": {"portfolio_id": "P1"}})
     assert state["schema_version"] == "olap-view-link.v1"
     assert storage_status(root=tmp_path)["backend"] == "duckdb_arrow_parquet"
+
+
+def test_config_driven_write_and_query(monkeypatch, tmp_path: Path) -> None:
+    """The shared store config decides the location when no root is passed."""
+    from fina_risk.storage import reload_storage_config
+
+    monkeypatch.setenv("FINA_OLAP_STORE", "local")
+    monkeypatch.setenv("FINA_OLAP_PARQUET_ROOT", str(tmp_path))
+    reload_storage_config()
+
+    result = write_risk_store(_views())
+    assert result["root"] == tmp_path.as_posix()
+    assert (tmp_path / "risk_wide.parquet").exists()
+
+    response = query_ssrm({"startRow": 0, "endRow": 10})
+    assert response["success"] is True
+    assert len(response["rows"]) == 2
+
+    status = storage_status()
+    assert status["store"]["store"] == "local"
+    assert status["root"] == tmp_path.as_posix()
+
+
+def test_hive_partition_glob_round_trip(monkeypatch, tmp_path: Path) -> None:
+    """A directory/hive partition glob writes a dataset dir that query_ssrm reads back."""
+    from fina_risk.storage import reload_storage_config
+
+    monkeypatch.setenv("FINA_OLAP_STORE", "local")
+    monkeypatch.setenv("FINA_OLAP_PARQUET_ROOT", str(tmp_path))
+    monkeypatch.setenv("FINA_OLAP_PARTITION_GLOB", "{tableName}/*.parquet")
+    monkeypatch.setenv("FINA_OLAP_HIVE_PARTITIONING", "1")
+    reload_storage_config()
+
+    write_risk_store(_views())
+    assert (tmp_path / "risk_wide" / "part-000.parquet").exists()
+
+    response = query_ssrm({"startRow": 0, "endRow": 10})
+    assert response["success"] is True
+    assert len(response["rows"]) == 2

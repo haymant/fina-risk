@@ -682,4 +682,322 @@ std::string to_json(const RiskResult& result) {
     return json{{"valuation", {{"pv", result.pv}}}, {"put_option_price", result.put_option_price}, {"legs", legs}}.dump(2);
 }
 
+namespace {
+
+// Daily-lifecycle pricing of one term-sheet job against a shared
+// (paths, observations, underlyings) spot cube. This is the faithful lane:
+//  - the coupon counts the DAILY observations that sit inside [lowRange, upRange]
+//    for each accrual period, nets the already-paid N1 fixings, carries the
+//    memory shortfall forward, and stops accruing once global KO has fired;
+//  - the worst-of PUT is knocked in on the FINAL fixing date only (EKI), and is
+//    cancelled on any path that was globally called.
+struct DailyPricing {
+    double pv{};
+    double put{};
+    double coupon{};
+    double funding{};
+    double ki{};
+    double ko{};
+    std::vector<double> fixings;
+    std::vector<double> memory;
+};
+
+DailyPricing price_daily_job(const json& common,
+                             const std::vector<double>& paths,
+                             std::size_t P, std::size_t O, std::size_t U,
+                             const std::vector<int>& dates) {
+    const auto& d = common.at("dealData");
+    const auto& m = common.at("marketData");
+    const auto& und = d.at("instrument").at("underlyings");
+    const double rate = m.at("discCurves").at(0).at("curve").at(0).value("rate", 0.0);
+    const int eval = m.value("evaluationDate", 0);
+    const int expiry = d.value("expiryDate", d.value("maturityDate", eval));
+    const double df = std::exp(-rate * std::max(expiry - eval, 0) / 365.0);
+    std::vector<double> refs(U, 100.0);
+    for (std::size_t i = 0; i < U && i < und.size(); ++i) refs[i] = und.at(i).value("spot", 100.0);
+    const auto& rg = d.value("RGACCLKO", json::object());
+    const double strike = d.value("knockInStar", json::object()).value("strikeKI2", d.value("strike", 0.78));
+    const double kib = d.value("knockInStar", json::object()).value("KIBarrier", 0.70);
+    const double gkb = rg.value("gblBarPrice", 1.10);
+    std::size_t EO = static_cast<std::size_t>(std::upper_bound(dates.begin(), dates.end(), expiry) - dates.begin());
+    if (EO == 0) EO = 1;
+    if (EO > O) EO = O;
+    std::vector<char> ki(P, 0), ko(P, 0);
+    std::vector<std::size_t> ko_step(P, O);
+    std::vector<double> terminal_worst(P, 1.0);
+    for (std::size_t p = 0; p < P; ++p) {
+        for (std::size_t o = 0; o < EO; ++o) {
+            double worst = 1.0e30;
+            bool all_above = true;
+            for (std::size_t j = 0; j < U; ++j) {
+                const double ratio = paths[(p * O + o) * U + j] / refs[j];
+                worst = std::min(worst, ratio);
+                if (ratio < gkb) all_above = false;
+            }
+            (void)worst;
+            if (!ko[p] && all_above) { ko[p] = 1; ko_step[p] = o; }
+        }
+        double worst_t = 1.0e30;
+        for (std::size_t j = 0; j < U; ++j)
+            worst_t = std::min(worst_t, paths[(p * O + (EO - 1)) * U + j] / refs[j]);
+        terminal_worst[p] = worst_t;
+        // EKI: European knock-in observed only on the final fixing date.
+        ki[p] = (worst_t <= kib) ? 1 : 0;
+    }
+    double put = 0.0;
+    for (std::size_t p = 0; p < P; ++p)
+        if (ki[p] && !ko[p]) put += std::max(strike - terminal_worst[p], 0.0);
+    put = put / static_cast<double>(P) * df;
+
+    const auto ends = rg.value("endDate", std::vector<int>{});
+    const auto pays = rg.value("paymentDate", std::vector<int>{});
+    const auto rates = rg.value("accruRate", std::vector<double>{});
+    const auto n1 = rg.value("N1", std::vector<int>{});
+    const auto n2 = rg.value("N2", std::vector<int>{});
+    const auto lows = rg.value("lowRange", std::vector<double>{});
+    const auto ups = rg.value("upRange", std::vector<double>{});
+    const double notional = d.value("notional", 1.0);
+    std::vector<double> cash(P, 0.0), memory(P, 0.0);
+    int previous = eval;
+    DailyPricing out;
+    out.put = put;
+    out.funding = df;
+    out.ki = std::accumulate(ki.begin(), ki.end(), 0.0) / static_cast<double>(P);
+    out.ko = std::accumulate(ko.begin(), ko.end(), 0.0) / static_cast<double>(P);
+    for (std::size_t i = 0; i < ends.size() && i < pays.size() && i < rates.size() && i < n1.size() && i < n2.size(); ++i) {
+        const auto it1 = std::upper_bound(dates.begin(), dates.end(), ends[i]);
+        const auto it0 = std::upper_bound(dates.begin(), dates.end(), previous);
+        if (ends[i] < dates.front()) { previous = ends[i]; continue; }
+        const std::size_t e = it1 == dates.begin() ? 0 : static_cast<std::size_t>(it1 - dates.begin() - 1);
+        const std::size_t s = static_cast<std::size_t>(it0 - dates.begin());
+        if (e < s || rates[i] == 0.0) { previous = ends[i]; continue; }
+        const double low = i < lows.size() ? lows[i] : 0.0;
+        const double up = i < ups.size() ? ups[i] : 1.0e9;
+        std::vector<double> obs(P, 0.0);
+        for (std::size_t p = 0; p < P; ++p) {
+            double count = 0.0;
+            for (std::size_t o = s; o <= e && o < O; ++o) {
+                double worst = 1.0e30;
+                for (std::size_t j = 0; j < U; ++j)
+                    worst = std::min(worst, paths[(p * O + o) * U + j] / refs[j]);
+                if (worst >= low && worst <= up) count += 1.0;
+            }
+            obs[p] = count;
+            const double future = std::max(count - static_cast<double>(n1[i]), 0.0);
+            const double total = std::max(static_cast<double>(n2[i]), 1.0);
+            const double frac = std::min((future + memory[p]) / total, 1.0);
+            if (ko_step[p] > e)
+                cash[p] += notional * rates[i] * frac * std::exp(-rate * std::max(pays[i] - eval, 0) / 365.0);
+            memory[p] = (ko_step[p] > e && future < total) ? std::max(total - future, 0.0) : 0.0;
+        }
+        out.fixings.push_back(std::accumulate(obs.begin(), obs.end(), 0.0) / static_cast<double>(P));
+        out.memory.push_back(std::accumulate(memory.begin(), memory.end(), 0.0) / static_cast<double>(P));
+        previous = ends[i];
+    }
+    const double raw = std::accumulate(cash.begin(), cash.end(), 0.0) / static_cast<double>(P);
+    out.coupon = raw / std::max(notional, 1.0) * d.value("legacyCouponQuoteScale", 10.0);
+    out.pv = df - out.put + out.coupon;
+    return out;
+}
+
+}  // namespace
+
+std::string run_daily_termsheet_json(const std::string& request_json,
+                                     const std::vector<double>& paths,
+                                     std::size_t paths_count,
+                                     std::size_t observations,
+                                     std::size_t underlyings,
+                                     const std::vector<int>& dates,
+                                     double bump) {
+    const json root = json::parse(request_json);
+    const auto& jobs = root.at("Chunk").at("Jobs");
+    const std::size_t P = paths_count, O = observations, U = underlyings;
+    auto price_all = [&](const std::vector<double>& cube) {
+        std::vector<DailyPricing> rs;
+        rs.reserve(jobs.size());
+        for (const auto& job : jobs) rs.push_back(price_daily_job(job.at("commonData"), cube, P, O, U, dates));
+        return rs;
+    };
+    auto canonical = [](const std::vector<DailyPricing>& q) {
+        return q[0].pv - q[0].coupon + (q.size() > 2 ? q[2].coupon : q[0].coupon);
+    };
+    const std::vector<DailyPricing> rs = price_all(paths);
+    const double pv = canonical(rs);
+    std::vector<double> deltas, gammas;
+    for (std::size_t u = 0; u < U; ++u) {
+        std::vector<double> up = paths, down = paths;
+        for (std::size_t p = 0; p < P; ++p)
+            for (std::size_t o = 0; o < O; ++o) {
+                up[(p * O + o) * U + u] *= 1.0 + bump;
+                down[(p * O + o) * U + u] *= 1.0 - bump;
+            }
+        const double pu = canonical(price_all(up));
+        const double pd = canonical(price_all(down));
+        deltas.push_back((pu - pd) / (2.0 * bump));
+        gammas.push_back((pu - 2.0 * pv + pd) / (bump * bump));
+    }
+    const std::size_t coupon_job = rs.size() > 2 ? 2 : 0;
+    json out{
+        {"engine", "cpp_daily_termsheet_eki"},
+        {"daily_observations", O},
+        {"paths", P},
+        {"underlyings", U},
+        {"pv", pv},
+        {"put_price", rs[0].put},
+        {"coupon_pv", rs[coupon_job].coupon},
+        {"funding", rs[0].funding},
+        {"relative_delta", deltas},
+        {"relative_gamma", gammas},
+        {"ki_probability", rs[0].ki},
+        {"ko_probability", rs[0].ko},
+        {"coupon_fixings", rs[coupon_job].fixings},
+        {"memory_carry", rs[coupon_job].memory},
+        {"ki_monitoring", "EKI"},
+        {"aad_engine", "disabled"},
+    };
+    return out.dump(2);
+}
+
+namespace {
+
+// Compact per-instrument spec for the batched daily lane (all features on):
+// refs / strike / EKI barrier / global-call barrier / expiry, and the coupon
+// period schedule with lowRange/upRange + N1/N2. `market` carries rate + eval.
+struct CompactDaily {
+    double pv{};
+    double put{};
+    double coupon{};
+    double funding{};
+    double ki{};
+    double ko{};
+};
+
+CompactDaily price_daily_compact(const json& inst,
+                                 const std::vector<double>& paths,
+                                 std::size_t P, std::size_t O, std::size_t U,
+                                 const std::vector<int>& dates,
+                                 double rate, int eval) {
+    std::vector<double> refs(U, 100.0);
+    const auto rj = inst.value("refs", std::vector<double>{});
+    for (std::size_t i = 0; i < U && i < rj.size(); ++i) refs[i] = rj[i];
+    const double strike = inst.value("strike", 0.78);
+    const double kib = inst.value("ki", 0.70);
+    const double gkb = inst.value("call", 1.10);
+    const int expiry = inst.value("expiry", eval);
+    const double notional = inst.value("notional", 1.0);
+    const double quote_scale = inst.value("quote_scale", 10.0);
+    const double df = std::exp(-rate * std::max(expiry - eval, 0) / 365.0);
+    std::size_t EO = static_cast<std::size_t>(std::upper_bound(dates.begin(), dates.end(), expiry) - dates.begin());
+    if (EO == 0) EO = 1;
+    if (EO > O) EO = O;
+    std::vector<char> ki(P, 0), ko(P, 0);
+    std::vector<std::size_t> ko_step(P, O);
+    std::vector<double> terminal_worst(P, 1.0);
+    for (std::size_t p = 0; p < P; ++p) {
+        for (std::size_t o = 0; o < EO; ++o) {
+            bool all_above = true;
+            for (std::size_t j = 0; j < U; ++j)
+                if (paths[(p * O + o) * U + j] / refs[j] < gkb) all_above = false;
+            if (!ko[p] && all_above) { ko[p] = 1; ko_step[p] = o; }
+        }
+        double worst_t = 1.0e30;
+        for (std::size_t j = 0; j < U; ++j)
+            worst_t = std::min(worst_t, paths[(p * O + (EO - 1)) * U + j] / refs[j]);
+        terminal_worst[p] = worst_t;
+        ki[p] = (worst_t <= kib) ? 1 : 0;  // EKI: final fixing only
+    }
+    double put = 0.0;
+    for (std::size_t p = 0; p < P; ++p)
+        if (ki[p] && !ko[p]) put += std::max(strike - terminal_worst[p], 0.0);
+    put = put / static_cast<double>(P) * df;
+
+    const auto periods = inst.value("periods", json::array());
+    std::vector<double> cash(P, 0.0), memory(P, 0.0);
+    for (const auto& per : periods) {
+        const int end = per.value("end", 0);
+        const int pay = per.value("pay", end);
+        const double prate = per.value("rate", 0.0);
+        const int pn1 = per.value("n1", 0);
+        const int pn2 = per.value("n2", 0);
+        const double low = per.value("low", 0.0);
+        const double up = per.value("up", 1.0e9);
+        if (prate == 0.0 || end < dates.front()) continue;
+        const auto it1 = std::upper_bound(dates.begin(), dates.end(), end);
+        const std::size_t e = it1 == dates.begin() ? 0 : static_cast<std::size_t>(it1 - dates.begin() - 1);
+        if (e > O) continue;
+        const std::size_t s = e < 20 ? 0 : e - 20;  // ~one month of observations
+        for (std::size_t p = 0; p < P; ++p) {
+            double count = 0.0;
+            for (std::size_t o = s; o <= e && o < O; ++o) {
+                double worst = 1.0e30;
+                for (std::size_t j = 0; j < U; ++j)
+                    worst = std::min(worst, paths[(p * O + o) * U + j] / refs[j]);
+                if (worst >= low && worst <= up) count += 1.0;
+            }
+            const double future = std::max(count - static_cast<double>(pn1), 0.0);
+            const double total = std::max(static_cast<double>(pn2), 1.0);
+            const double frac = std::min((future + memory[p]) / total, 1.0);
+            if (ko_step[p] > e)
+                cash[p] += notional * prate * frac * std::exp(-rate * std::max(pay - eval, 0) / 365.0);
+            memory[p] = (ko_step[p] > e && future < total) ? std::max(total - future, 0.0) : 0.0;
+        }
+    }
+    const double raw = std::accumulate(cash.begin(), cash.end(), 0.0) / static_cast<double>(P);
+    CompactDaily out;
+    out.put = put;
+    out.funding = df;
+    out.coupon = raw / std::max(notional, 1.0) * quote_scale;
+    out.pv = df - out.put + out.coupon;
+    out.ki = std::accumulate(ki.begin(), ki.end(), 0.0) / static_cast<double>(P);
+    out.ko = std::accumulate(ko.begin(), ko.end(), 0.0) / static_cast<double>(P);
+    return out;
+}
+
+}  // namespace
+
+std::string run_daily_termsheet_batch_json(const std::string& instruments_json,
+                                           const std::string& market_json,
+                                           const std::vector<double>& paths,
+                                           std::size_t paths_count,
+                                           std::size_t observations,
+                                           std::size_t underlyings,
+                                           const std::vector<int>& dates) {
+    const json instruments = json::parse(instruments_json);
+    const json market = json::parse(market_json);
+    const auto& records = instruments.at("instruments");
+    const double rate = market.value("rate", 0.0);
+    const int eval = market.value("evaluation_date", 0);
+    const std::size_t P = paths_count, O = observations, U = underlyings;
+    const auto started = std::chrono::steady_clock::now();
+    double put_sum = 0.0, coupon_sum = 0.0, funding_sum = 0.0, pv_sum = 0.0, ki_sum = 0.0, ko_sum = 0.0;
+#pragma omp parallel for schedule(static) reduction(+:put_sum,coupon_sum,funding_sum,pv_sum,ki_sum,ko_sum)
+    for (std::int64_t t = 0; t < static_cast<std::int64_t>(records.size()); ++t) {
+        const auto r = price_daily_compact(records[static_cast<std::size_t>(t)], paths, P, O, U, dates, rate, eval);
+        put_sum += r.put; coupon_sum += r.coupon; funding_sum += r.funding; pv_sum += r.pv;
+        ki_sum += r.ki; ko_sum += r.ko;
+    }
+    const auto finished = std::chrono::steady_clock::now();
+    const double elapsed = std::chrono::duration<double>(finished - started).count();
+    const double n = static_cast<double>(records.size());
+    json out{
+        {"engine", "cpp_daily_termsheet_eki_batch"},
+        {"instruments", records.size()},
+        {"paths", P},
+        {"observations", O},
+        {"underlyings", U},
+        {"ki_monitoring", "EKI"},
+        {"aad_engine", "disabled"},
+        {"put_checksum", put_sum},
+        {"coupon_checksum", coupon_sum},
+        {"funding_checksum", funding_sum},
+        {"pv_checksum", pv_sum},
+        {"mean_pv", pv_sum / std::max(n, 1.0)},
+        {"ki_probability_mean", ki_sum / std::max(n, 1.0)},
+        {"ko_probability_mean", ko_sum / std::max(n, 1.0)},
+        {"elapsed_seconds", elapsed},
+        {"instruments_per_second", n / std::max(elapsed, 1e-12)},
+    };
+    return out.dump(2);
+}
+
 }  // namespace fina::risk

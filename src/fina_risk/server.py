@@ -11,8 +11,10 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import JSONResponse
 
+from . import etl, scheduler_adapter
 from .benchmarking import run_benchmark
-from .olap import link_view_state, query_ssrm, resolve_s3_uri, storage_status, write_risk_store
+from .gcs import load_local_env, object_store_status
+from .olap import link_view_state, query_ssrm, resolve_dataset_source, resolve_s3_uri, storage_status, write_risk_store
 from .pipeline import (
     dashboard_metadata,
     ingest_instruments,
@@ -24,6 +26,18 @@ from .pipeline import (
 )
 from .pricing import bump_result, common_from_job, load_legacy_request, price_fixture
 from .risk_view import aggregate_risk_views
+from .storage import (
+    ALLOWED_STORES,
+    clear_storage_override,
+    get_storage_config,
+    set_storage_override,
+    storage_overrides,
+)
+from .storage import storage_status as _store_status
+
+# Load local dev config (never overrides real env vars): .env.local wins over .env.
+load_local_env(".env")
+load_local_env()
 
 TOOLS = {
     "market": [
@@ -268,21 +282,21 @@ def _execute(name: str, payload: dict[str, Any] | None) -> dict[str, Any]:
         results = [bump_result(common_from_job(job), paths=paths, seed=seed) for job in jobs]
         return write_risk_store(
             [x["risk_representation"] for x in results],
-            root=payload.get("root", "/tmp/fina-risk-olap"),
+            root=payload.get("root"),
             metadata={"source": "pricing_and_sensitivity", "seed": seed, "paths": paths},
         )
     if name == "olap_query":
-        return query_ssrm(payload.get("query", payload), root=payload.get("root", "/tmp/fina-risk-olap"))
+        return query_ssrm(payload.get("query", payload), root=payload.get("root"))
     if name == "storage_status":
-        return storage_status(root=payload.get("root", "/tmp/fina-risk-olap"))
+        return storage_status(root=payload.get("root"))
     if name == "resolve_s3_dataset":
         return {"status": "ok", "uri": resolve_s3_uri(payload)}
     if name == "link_olap_views":
         return link_view_state(payload)
     if name == "ingest_instruments":
-        return ingest_instruments(payload, root=payload.get("root", "/tmp/fina-risk-olap"))
+        return ingest_instruments(payload, root=payload.get("root") or get_storage_config().local_root)
     if name == "ingest_market_data":
-        return ingest_market_data(payload, root=payload.get("root", "/tmp/fina-risk-olap"))
+        return ingest_market_data(payload, root=payload.get("root") or get_storage_config().local_root)
     if name == "read_risk_metadata":
         return risk_metadata()
     if name == "read_dashboard_metadata":
@@ -412,10 +426,197 @@ for tool_name, description in ALL_TOOLS + [
     mcp.tool(name=tool_name, description=description)(_tool)
 
 
+@mcp.tool()
+def store_config() -> dict[str, Any]:
+    """Read the effective store configuration (backend, local root, bucket, partition glob, hive flag).
+
+    Same env vars and shape as fina-olap: ``FINA_OLAP_STORE`` / ``FINA_OLAP_BUCKET``
+    / ``FINA_OLAP_PARQUET_ROOT`` / ``FINA_OLAP_PATH`` / ``S3_PATH_TEMPLATE`` /
+    ``FINA_OLAP_PARTITION_GLOB`` / ``FINA_OLAP_HIVE_PARTITIONING`` (plus the
+    ``S3_*`` aliases). ``overrides`` lists fields switched at runtime via
+    ``store_configure`` (they sit on top of the env base until cleared).
+    """
+    return {"store": _store_status()}
+
+
+@mcp.tool()
+def store_configure(
+    store: str = "",
+    parquet_root: str = "",
+    bucket: str = "",
+    path: str = "",
+    partition_glob: str = "",
+    hive_partitioning: str = "",
+    clear: bool = False,
+) -> dict[str, Any]:
+    """Configure the shared store at runtime (process-local; env vars remain the boot default).
+
+    Only non-empty fields are changed; pass ``clear=true`` to reset overrides back
+    to the env base first. ``hive_partitioning`` accepts 1/0/true/false. Returns
+    the effective config after the change. Point fina-risk and fina-olap at the
+    same root/bucket to run a risk-generation → OLAP-analysis E2E.
+    """
+    if store and store not in ALLOWED_STORES:
+        raise ValueError(f"store must be one of {', '.join(ALLOWED_STORES)}; got {store!r}")
+    if clear:
+        clear_storage_override()
+    changes: dict[str, Any] = {}
+    if store:
+        changes["store"] = store
+    if parquet_root:
+        changes["root"] = parquet_root
+    if bucket:
+        changes["bucket"] = bucket
+    if path:
+        changes["default_path"] = path
+    if partition_glob:
+        changes["partition_glob"] = partition_glob
+    if hive_partitioning:
+        changes["hive_partitioning"] = hive_partitioning
+    if changes:
+        set_storage_override(**changes)
+    return {"store": _store_status()}
+
+
+@mcp.tool()
+def store_resolve(table_name: str = "risk_wide") -> dict[str, Any]:
+    """Preview how a dataset resolves under the current store config (source, hive flag, overrides)."""
+    source, hive = resolve_dataset_source(table_name)
+    cfg = get_storage_config()
+    return {
+        "table_name": table_name,
+        "store": cfg.store,
+        "source": source,
+        "object_store": source.startswith(("s3://", "gs://", "http://", "https://")),
+        "hive_partitioning": hive,
+        "partition_glob": cfg.partition_glob,
+        "overrides": storage_overrides(),
+    }
+
+
+@mcp.tool()
+def augment_termsheet(termsheet: str = "", count: int = 10, seed: int = 20260909, out_path: str = "") -> dict[str, Any]:
+    """ETL: clone the bundled term sheet into ``count`` variants with permuted economics.
+
+    Permutations mirror ``scripts/generate_benchmark.py`` (relative strike,
+    knock-in barrier, call barrier, notional, underlyings/spot, coupon rate and
+    the expiry/maturity calendar). Deterministic from ``seed``. ``termsheet`` is
+    an optional path to a legacy request; omit to use the bundled
+    ``skills/fina-risk/refs/termsheet1.md.json``. When ``out_path`` is given the
+    batch is written as ``{"count", "instruments": [...]}`` and omitted from the
+    reply.
+    """
+    variants = etl.augment_termsheet(termsheet or None, count=count, seed=seed)
+    result: dict[str, Any] = {"status": "ok", "count": len(variants), "seed": seed}
+    if out_path:
+        Path(out_path).write_text(json.dumps({"count": len(variants), "instruments": variants}, separators=(",", ":")))
+        result["out_path"] = out_path
+    else:
+        result["instruments"] = variants
+    return result
+
+
+@mcp.tool()
+def compile_pricing_requests(
+    termsheet: str = "",
+    count: int = 1,
+    seed: int = 20260909,
+    validate: bool = True,
+) -> dict[str, Any]:
+    """ETL: convert augmented term sheets into fina-risk ``pricing-request`` objects.
+
+    Maps each legacy request to ``{instrument_key, market_data, legs, parameters,
+    common_economics}`` (schema ``skills/fina-risk/schema/pricing-request.schema.json``)
+    so the batch can be scheduled/priced by fina-risk.
+    """
+    variants = etl.augment_termsheet(termsheet or None, count=count, seed=seed)
+    requests = [etl.compile_pricing_request(v) for v in variants]
+    if validate:
+        for request in requests:
+            etl.validate_pricing_request(request)
+    return {"status": "ok", "count": len(requests), "requests": requests}
+
+
+@mcp.tool()
+def run_risk_task(
+    mode: str = "batch",
+    instruments: int = 100,
+    underlyings: int = 25,
+    paths: int = 1000,
+    factors: int = 12,
+    seed: int = 20260909,
+    persist: bool = True,
+    pricing_request: dict[str, Any] | None = None,
+    execution: dict[str, Any] | None = None,
+    greeks: list[str] | None = None,
+    sensitivities: str = "delta",
+    pnl: str = "taylor1",
+) -> dict[str, Any]:
+    """Run fina-risk compute for a scheduler task (``fina-risk.risk_batch`` / ``fina-risk.pricing_and_sensitivity``).
+
+    ``mode="batch"`` prices ``instruments`` underlyings via the shared-path
+    benchmark and (``persist``) writes ``risk_wide``/``risk_long`` to the shared
+    store for fina-olap. ``mode="benchmark"`` runs the same kernel without
+    persistence or risk rows and returns a timing breakdown — use it to sweep
+    ``instruments`` at a fixed ``paths`` count. ``mode="single"`` prices one
+    legacy ``Chunk.Jobs`` request supplied as ``pricing_request``.
+    """
+    return scheduler_adapter.run_risk_task(
+        {
+            "mode": mode,
+            "instruments": instruments,
+            "underlyings": underlyings,
+            "paths": paths,
+            "factors": factors,
+            "seed": seed,
+            "persist": persist,
+            "pricing_request": pricing_request,
+            "execution": execution,
+            "greeks": greeks,
+            "sensitivities": sensitivities,
+            "pnl": pnl,
+        }
+    )
+
+
+@mcp.tool()
+def run_etl_task(
+    mode: str = "augment",
+    termsheet: str = "",
+    count: int = 10,
+    seed: int = 20260909,
+    out_path: str = "",
+) -> dict[str, Any]:
+    """Run a fina-etl task for the scheduler: ``augment`` or ``compile``.
+
+    ``augment`` clones the term sheet into ``count`` permuted variants;
+    ``compile`` additionally converts them to validated ``pricing-request``
+    objects. Maps to the ``fina-etl.augment_termsheet`` /
+    ``fina-etl.compile_pricing_requests`` scheduler handlers.
+    """
+    result = scheduler_adapter.run_risk_task(
+        {"mode": mode, "termsheet": termsheet or None, "count": count, "seed": seed, "validate": True}
+    )
+    if out_path and mode == "augment":
+        Path(out_path).write_text(
+            json.dumps({"count": result["count"], "instruments": result["instruments"]}, separators=(",", ":"))
+        )
+        result.pop("instruments", None)
+        result["out_path"] = out_path
+    return result
+
+
 @mcp.custom_route("/healthz", methods=["GET"])
 async def healthz(_request: Any) -> JSONResponse:
     return JSONResponse(
-        {"status": "ok", "service": "fina-risk", "tools": len(ALL_TOOLS) + 2, "backend": "local-vectorized-cpu"}
+        {
+            "status": "ok",
+            "service": "fina-risk",
+            "tools": len(ALL_TOOLS) + 2,
+            "backend": "local-vectorized-cpu",
+            "store": _store_status(),
+            "object_store": object_store_status(),
+        }
     )
 
 

@@ -116,3 +116,25 @@ def test_vercel_deployment_host_passes_host_security() -> None:
 def test_unknown_host_still_rejected() -> None:
     status = asyncio.run(_mcp_initialize("attacker.example.com"))
     assert status == 421
+
+
+def test_shared_store_tools_registered_and_configurable() -> None:
+    """fina-risk exposes the same store_config/store_configure/store_resolve tools."""
+
+    async def _call(name: str, args: dict[str, Any]) -> Any:
+        return await mcp.call_tool(name, args)
+
+    try:
+        configured = asyncio.run(
+            _call("store_configure", {"store": "local", "parquet_root": "/tmp/fina-risk-e2e", "hive_partitioning": "1"})
+        )
+        assert "store" in str(configured)
+
+        resolved = asyncio.run(_call("store_resolve", {"table_name": "risk_wide"}))
+        assert "risk_wide" in str(resolved)
+        assert "/tmp/fina-risk-e2e" in str(resolved)
+
+        config = asyncio.run(_call("store_config", {}))
+        assert "partition_glob" in str(config)
+    finally:
+        asyncio.run(_call("store_configure", {"clear": True}))
