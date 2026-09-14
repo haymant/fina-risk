@@ -84,7 +84,9 @@ uses the real NYSE calendar (101 fixings to the 2027-02-01 option expiry on a
 
 | lane | PUT | COUPON | FUNDING | PV | KI prob |
 |---|---:|---:|---:|---:|---:|
-| terminal `price_fixture` (python, resolved corr) | 0.021429 | 0.000000 | 0.985048 | 0.963619 | — |
+| terminal `price_fixture` (python, resolved corr, **default = KI-gated Dupire LV**) | **0.021979** | 0.000000 | 0.985048 | 0.959124 | — |
+| terminal `price_fixture` (`locvol=False`, KI-gated scalar ATM) | 0.016970 | 0.000000 | 0.985048 | 0.968079 | — |
+| terminal `price_fixture` (`locvol=False`, **vanilla** — regression baseline) | 0.021429 | 0.000000 | 0.985048 | 0.963619 | — |
 | C++ `price_fixture` (surface + NYSE, resolved corr) | 0.020735 | 0.000000 | 0.984260 | 0.963745 | — |
 | canonical PV (PUT+FUNDING job1 + COUPON job3) | py 1.4735064 · cpp 1.4734669 · Δ 3.95e-05 | | | | |
 | **daily EKI (python == cpp, NYSE + surface + resolved corr)** | **0.020218** | **0.263057** | 0.984260 | **1.227888** | 0.1486 |
@@ -100,6 +102,48 @@ a continuous 101-step, no-dividend kernel).
 Daily EKI detail: `coupon_fixings=[18,22,20,22,19]`,
 `memory_carry=[2.2904,0,0,0,0]`, `ko_probability=0.5412`,
 `relative_delta=[-0.271883,-1.294368]`.
+
+### PUT contract — European knock-in gate (terminal lane)
+
+The fixture PUT is the **ELIFCN_KI down-and-in**, not a vanilla put: it pays
+`max(strike − worst, 0)` **only when the final-fixing worst ratio ≤ KIBarrier
+(0.70)**. `price_fixture` now enforces this with
+`price_terminal_legs(..., knock_in=ki)` where
+`ki = worst(final) <= knockInStar.KIBarrier`, and the XAD lane takes the same
+mask (`aad_put_sensitivity(..., knock_in=ki)`) so `aad.value == put_option_price`
+still holds.
+
+**Why this matters (the regression trap):** the terminal lane was introduced
+(commit `85332b6`) computing `ki` but using it only for
+`barrier_hit_probability`; the payoff was `df·max(strike−worst,0).mean()` —
+**vanilla**. Commit `1079f57` moved that unconditional payoff into the shared
+kernel `price_terminal_legs`, so the terminal lane stayed vanilla by
+construction, while only `fina_risk.daily_termsheet` gated (`ki_hit`). Two lanes
+therefore priced two different products and the "canonical PUT" (0.021429)
+silently dropped the no-knock-in branch. Wiring Dupire local vol into that
+vanilla lane pushed it up (0.025924) instead of reconciling. **Do not price the
+terminal PUT without `knock_in`.**
+
+EKI-gated PUT ladder, termsheet1 fixture, 30k paths, seed 1729 (legacy PY
+reference **0.02113**):
+
+| vol read | PUT |
+|---|---:|
+| ATM point (`_parse_vol`) | 0.016970 |
+| surface @ 78% moneyness | 0.020133 |
+| surface @ 76% / 74% moneyness | 0.020979 / 0.021848 |
+| **Dupire LV (full smile)** | **0.021979** |
+| daily EKI lane (gate + memory-KO, conservative vols) | 0.020218 |
+
+The KI gate + Dupire LV (0.021979) sits ~4% above the legacy 0.02113; the
+residual is the legacy's surface interpolation at the moneyness. The `vol_ratio`
+argument (`bump_result` / `pricing_and_sensitivity`) selects the scalar surface
+read so this can be reconciled empirically.
+
+**Default:** the pricing lane now defaults to `locvol=True` (KI-gated Dupire LV),
+so `price_fixture` / `bump_result` / `pricing_and_sensitivity` return **0.021979**
+for the fixture PUT unless the caller passes `locvol=False` (scalar) or a
+`vol_ratio` (scalar surface read).
 
 ## Reference numbers — 100k benchmark
 

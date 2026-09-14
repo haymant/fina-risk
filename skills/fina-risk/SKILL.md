@@ -200,7 +200,8 @@ The skill is executable and testable against the bundled term-sheet fixture and 
 
 - `refs/termsheet1.md` — sanitized **full term sheet**: USD non-principal-protected ELI, 9-month daily-memory-callable note, final-fixing-date knock-in (EKI), worst-of 2-asset basket, physical delivery on knock-in.
 - `refs/termsheet1.md.json` — the **same product as a legacy pricing engine request**. It carries `marketData`, `instrument economics`, and the **PV pricing bumping settings**, and breaks the single instrument into its **three legs, one per `finaRefJobID`**.
-- PV - the legacy engine generates price 0.02113 for the PUT option, without any bumping.
+- **Legacy PUT reference = 0.02113** for the EKI-gated *down-and-in* put (78% strike, final-fixing 70% knock-in), no bumping.
+- **The PUT is the ELIFCN_KI down-and-in, not a vanilla put.** `price_fixture` must pass the European knock-in mask into the shared kernel — `price_terminal_legs(..., knock_in=ki)` with `ki = worst(final) <= knockInStar.KIBarrier` — and the XAD lane must receive the same mask (`aad_put_sensitivity(..., knock_in=ki)`). Pricing the plain vanilla 78% worst-of put (terminal PV `0.021429`) is a **contract mismatch**: it drops the "no knock-in ⇒ par, no loss" branch. The daily lane always gated this (`fina_risk.daily_termsheet`, `ki_hit = worst[:,-1] <= ki_barrier`); the terminal lane now does too.
 
 ### Legacy request anatomy
 
@@ -254,7 +255,8 @@ uv run --project /path/to/fina-pricer mypy src
 
 - **Leg decomposition**: aggregate PV equals the signed sum of the three leg PVs (funding at par + short intrinsic option + coupon strip). PUT leg PV must be negative (`multiplier=-1`).
 - **Bump parity**: per-RFK spot delta reproduces the $\pm$1% bump differences from the legacy `Tasks`; report `bump_size=0.01`, relative mode, and method per cell.
-- **Payoff consistency**: worst-of, strike-normalized basket; EKI knockdown only when the worst performing asset closes ≤ 70% of initial spot on the final fixing date; redemption capped at 100% of notional after KI; memory call when both underlyings close ≥ 110% (then all `GKOLocked`).
+- **Payoff consistency**: worst-of, strike-normalized basket; EKI knockdown only when the worst performing asset closes ≤ 70% of initial spot on the final fixing date; redemption capped at 100% of notional after KI; memory call when both underlyings close ≥ 110% (then all `GKOLocked`). The terminal lane enforces this via `knock_in` (see Canonical fixture); a vanilla PUT price is a regression.
+- **Vol read**: the terminal scalar lane reads the surface at the note's exercise/knock-in moneyness (`vol_ratio` of the reference spot), **not** a single ATM point (`_parse_vol`). Ladder on the fixture (EKI-gated PUT, 30k/seed 1729): ATM 0.016970 · surface@78% 0.020133 · surface@74% 0.021848 · Dupire LV 0.021979 · daily EKI(+KO) 0.020218 — legacy reference 0.02113.
 - **Lifecycle / memory carry**: coupon leg reflects the ADBE `GKOLocked` memory event on 2026-06-01 and pays accrued unpaid coupons on call.
 - **Explainability**: report model, path/step counts, seed, moneyness, time to expiry, barrier events/hit probability, applied fixings, and coupon-memory carry, matching fina-pricer's `explainability` object.
 

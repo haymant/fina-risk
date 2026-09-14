@@ -14,8 +14,10 @@ def test_fixture_pricing_put_and_leg_sign() -> None:
         "pricing_and_sensitivity", {"request": json.loads(FIXTURE.read_text()), "paths": 30000, "seed": 1729}
     )
     base = result["base"]
-    # Lake-store correlation (ADBE-AMZN 0.4041) replaces the market-data value.
-    assert abs(base["put_option_price"] - 0.02143) < 0.00015
+    # Default pricing lane = European knock-in gate (final fixing, 70%) on the
+    # Dupire local-vol surface: 0.021979. Lake-store correlation (0.4041) still
+    # replaces the market-data value.
+    assert abs(base["put_option_price"] - 0.021979) < 0.0002
     assert base["put_leg_pv"] < 0
     assert abs(sum(x["pv"] for x in base["legs"]) - base["valuation"]["pv"]) < 1e-12
     assert base["explainability"]["ki_monitoring"] == "EKI"
@@ -36,7 +38,9 @@ def test_legacy_relative_bumps_use_quoted_spots_and_crn() -> None:
     equity_dollar_delta = sum(
         x["dollar_delta"] for x in result["sensitivities"] if x["risk_factor_id"].startswith("EQ:")
     )
-    assert equity_dollar_delta < -8000.0
+    # Short worst-of down-and-in PUT: net equity dollar delta is negative (the
+    # gate shrinks the vanilla magnitude; bound recalibrated for the KI-gated put).
+    assert equity_dollar_delta < -3000.0
 
 
 def test_compiler_exposes_all_three_legacy_legs() -> None:
@@ -77,6 +81,9 @@ def test_fixture_adapter_matches_shared_terminal_leg_kernel() -> None:
     market = market_from_legacy(common, paths=4000, seed=1729)
     terminal = result["base"]["artifacts"]["path_cube"]["terminal"]
     coupon = next(x["pv"] for x in result["base"]["legs"] if x["leg_name"] == "COUPON")
+    ki = (np.asarray(terminal) / market.reference_spots[None, :]).min(axis=1) <= float(
+        common["dealData"]["knockInStar"]["KIBarrier"]
+    )
     kernel = price_terminal_legs(
         np.asarray(terminal),
         market.quoted_spots,
@@ -84,6 +91,7 @@ def test_fixture_adapter_matches_shared_terminal_leg_kernel() -> None:
         result["base"]["explainability"]["moneyness"],
         result["base"]["discount_factor"],
         coupon,
+        knock_in=ki,
     )
     assert kernel["pricing_kernel"] == "price_terminal_legs.v1"
     assert kernel["valuation"]["pv"] == result["base"]["valuation"]["pv"]
@@ -115,7 +123,9 @@ def test_build_locvol_map_reads_fixture_surfaces_with_skew() -> None:
 
 def test_locvol_lane_reprices_fixture_differently_from_scalar() -> None:
     request = json.loads(FIXTURE.read_text())
-    scalar = _execute("pricing_and_sensitivity", {"request": request, "paths": 4000, "seed": 1729})["base"]
+    scalar = _execute(
+        "pricing_and_sensitivity", {"request": request, "paths": 4000, "seed": 1729, "locvol": False}
+    )["base"]
     locvol = _execute(
         "pricing_and_sensitivity", {"request": request, "paths": 4000, "seed": 1729, "locvol": True}
     )["base"]

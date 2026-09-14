@@ -22,6 +22,7 @@ def aad_fixed_branch_market_sensitivities(
     *,
     log_returns: np.ndarray | None = None,
     skew_basis: np.ndarray | None = None,
+    knock_in: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """Differentiate frozen-branch payoff arithmetic with respect to market inputs.
 
@@ -46,6 +47,9 @@ def aad_fixed_branch_market_sensitivities(
     performance = quoted[None, :] * multipliers / refs[None, :]
     worst_index = performance.argmin(axis=1)
     active = performance.min(axis=1) < strike
+    if knock_in is not None:
+        # European knock-in gate: the down-and-in PUT only pays on knocked-in paths.
+        active = active & np.asarray(knock_in, dtype=bool)
     spot_inputs = [Real(float(x)) for x in quoted]
     vol_input = Real(1.0)
     discount_input = Real(float(discount_factor))
@@ -95,6 +99,8 @@ def aad_put_sensitivity(
     terminal_multipliers: np.ndarray,
     strike: float,
     discount_factor: float,
+    *,
+    knock_in: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """Differentiate a fixed-branch Monte Carlo PUT payoff with XAD."""
     result = aad_fixed_branch_market_sensitivities(
@@ -103,6 +109,7 @@ def aad_put_sensitivity(
         terminal_multipliers,
         strike,
         discount_factor,
+        knock_in=knock_in,
     )
     if result.get("available"):
         result["deltas"] = result["deltas"]

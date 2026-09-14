@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from typing import Any
 
@@ -232,16 +232,26 @@ def price_terminal_legs(
     strike: float,
     discount_factor: float,
     coupon_pv: float,
+    knock_in: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """Price normalized PUT/FUNDING/COUPON legs from shared terminal paths.
 
     This is the common execution kernel for the legacy fixture and augmented
     benchmark. Adapters are responsible only for normalizing their source
     schemas and calculating any product-specific coupon cash-flow input.
+
+    ``knock_in`` is the product's European knock-in mask (one bool per path,
+    observed on the final fixing date).  When supplied, the PUT is a *down-and-in*
+    put — it pays ``max(strike - worst, 0)`` only on knocked-in paths and zero
+    otherwise — which is the ELIFCN_KI payoff.  When omitted the kernel prices the
+    plain vanilla worst-of put (the benchmark lane's contract).
     """
     performance = terminal_spots / reference_spots[None, :]
     worst = performance.min(axis=1)
-    put = float(discount_factor * np.maximum(strike - worst, 0.0).mean())
+    intrinsic = np.maximum(strike - worst, 0.0)
+    if knock_in is not None:
+        intrinsic = np.where(knock_in, intrinsic, 0.0)
+    put = float(discount_factor * intrinsic.mean())
     funding = float(discount_factor)
     leg_pv = {"PUT": -put, "FUNDING": funding, "COUPON": float(coupon_pv)}
     return {
@@ -355,6 +365,22 @@ def _leg(deal: dict[str, Any], name: str, multiplier: float) -> dict[str, Any]:
     }
 
 
+def _moneyness_vols(market: Market, market_data: dict[str, Any], ratio: float, expiry: float) -> Market:
+    """Replace the flat per-name vol with a full-surface read at ``ratio`` of the
+    reference spot (the note's exercise/knock-in moneyness), instead of the single
+    ATM nearest-strike point that ``_parse_vol`` returns.  This is the vol read the
+    product's payoff actually references, so it belongs with the KI gate."""
+    surfaces = {s.get("_id"): s for s in market_data.get("eqVol", [])}
+    vols = np.array(market.vols, dtype=float, copy=True)
+    for i, name in enumerate(market.names):
+        surface = surfaces.get(name)
+        if surface is not None:
+            vols[i] = _surface_vol_at(
+                surface, ratio * float(market.reference_spots[i]), expiry, float(market.evaluation_date)
+            )
+    return replace(market, vols=vols)
+
+
 def price_fixture(
     common: dict[str, Any],
     *,
@@ -362,12 +388,15 @@ def price_fixture(
     seed: int = 1729,
     spots: list[float] | None = None,
     steps: int = 194,
-    locvol: bool = False,
+    locvol: bool = True,
+    vol_ratio: float | None = None,
 ) -> dict[str, Any]:
     deal = common["dealData"]
     md = common["marketData"]
     market = market_from_legacy(common, paths=paths, seed=seed, spots=spots, locvol=locvol)
     expiry = int(deal.get("expiryDate", deal.get("maturityDate")))
+    if vol_ratio is not None:
+        market = _moneyness_vols(market, md, float(vol_ratio), expiry)
     terminal1, terminal2, path_log = _simulate(market, expiry, steps=steps)
     refs = market.reference_spots
     terminal_spots = np.column_stack((terminal1, terminal2))
@@ -377,7 +406,7 @@ def price_fixture(
     strike = float(deal.get("knockInStar", {}).get("strikeKI2", deal.get("strike", 0.78)))
     intrinsic = np.maximum(strike - worst, 0.0)
     df = math.exp(-market.rate * year_fraction(market.evaluation_date, expiry))
-    kernel = price_terminal_legs(terminal_spots, market.quoted_spots, refs, strike, df, 0.0)
+    kernel = price_terminal_legs(terminal_spots, market.quoted_spots, refs, strike, df, 0.0, knock_in=ki)
     put_unit = kernel["put_option_price"]
     active = (intrinsic > 0.0)[:, None] & (perf == perf.min(axis=1, keepdims=True))
     pathwise_values = -df * (perf / market.quoted_spots[None, :]) * active
@@ -388,10 +417,11 @@ def price_fixture(
         np.column_stack((terminal1 / market.quoted_spots[0], terminal2 / market.quoted_spots[1])),
         strike,
         df,
+        knock_in=ki,
     )
     coupon, coupon_explain = _coupon_pv(deal, market, path_log)
     rg = deal.get("RGACCLKO", {})
-    kernel = price_terminal_legs(terminal_spots, market.quoted_spots, refs, strike, df, coupon)
+    kernel = price_terminal_legs(terminal_spots, market.quoted_spots, refs, strike, df, coupon, knock_in=ki)
     put_unit = kernel["put_option_price"]
     total = kernel["valuation"]["pv"]
     return {
@@ -489,9 +519,14 @@ def common_from_job(job: dict[str, Any]) -> dict[str, Any]:
 
 
 def bump_result(
-    common: dict[str, Any], *, paths: int | None = None, seed: int = 1729, locvol: bool = False
+    common: dict[str, Any],
+    *,
+    paths: int | None = None,
+    seed: int = 1729,
+    locvol: bool = True,
+    vol_ratio: float | None = None,
 ) -> dict[str, Any]:
-    base = price_fixture(common, paths=paths, seed=seed, locvol=locvol)
+    base = price_fixture(common, paths=paths, seed=seed, locvol=locvol, vol_ratio=vol_ratio)
     market = market_from_legacy(common, paths=paths, seed=seed, locvol=locvol)
     scenarios: list[dict[str, Any]] = [
         {"label": "base", "spots": market.quoted_spots.tolist(), "price": base["put_option_price"]}
@@ -503,7 +538,9 @@ def bump_result(
         for sign in (1, -1):
             shifted = market.quoted_spots.copy()
             shifted[i] += sign * bump
-            result = price_fixture(common, paths=paths, seed=seed, spots=shifted.tolist(), locvol=locvol)
+            result = price_fixture(
+                common, paths=paths, seed=seed, spots=shifted.tolist(), locvol=locvol, vol_ratio=vol_ratio
+            )
             scenarios.append(
                 {"label": f"{name}:{sign:+d}%", "spots": shifted.tolist(), "price": result["put_option_price"]}
             )

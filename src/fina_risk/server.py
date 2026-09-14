@@ -163,10 +163,14 @@ def _execute(name: str, payload: dict[str, Any] | None) -> dict[str, Any]:
     common = common_from_job(jobs[0]) if jobs else {}
     paths, seed = payload.get("paths"), int(payload.get("seed", 1729))
     if name == "pricing_and_sensitivity":
-        locvol = bool(payload.get("locvol", False))
-        result = bump_result(common, paths=paths, seed=seed, locvol=locvol)
+        locvol = bool(payload.get("locvol", True))
+        vol_ratio = payload.get("vol_ratio")
+        vol_ratio = float(vol_ratio) if vol_ratio is not None else None
+        result = bump_result(common, paths=paths, seed=seed, locvol=locvol, vol_ratio=vol_ratio)
         if len(jobs) >= 3:
-            coupon = price_fixture(common_from_job(jobs[2]), paths=paths, seed=seed, locvol=locvol)
+            coupon = price_fixture(
+                common_from_job(jobs[2]), paths=paths, seed=seed, locvol=locvol, vol_ratio=vol_ratio
+            )
             coupon_pv = next(x["pv"] for x in coupon["legs"] if x["leg_name"] == "COUPON")
             result["base"]["legs"][-1]["pv"] = coupon_pv
             result["base"]["valuation"]["pv"] = sum(x["pv"] for x in result["base"]["legs"])
@@ -239,7 +243,7 @@ def _execute(name: str, payload: dict[str, Any] | None) -> dict[str, Any]:
             },
         }
     if name == "build_path_cube":
-        r = price_fixture(common, paths=paths, seed=seed, locvol=bool(payload.get("locvol", False)))
+        r = price_fixture(common, paths=paths, seed=seed, locvol=bool(payload.get("locvol", True)))
         return {
             "cube_id": r["artifacts"]["path_cube_id"],
             "universe_id": r["artifacts"]["simulation_universe_id"],
@@ -270,7 +274,7 @@ def _execute(name: str, payload: dict[str, Any] | None) -> dict[str, Any]:
         }
     if name in {"aggregate_portfolio", "net_sensitivities", "aggregate_risk"}:
         results = [
-            bump_result(common_from_job(job), paths=paths, seed=seed, locvol=bool(payload.get("locvol", False)))
+            bump_result(common_from_job(job), paths=paths, seed=seed, locvol=bool(payload.get("locvol", True)))
             for job in jobs
         ]
         aggregated = aggregate_risk_views(results)
@@ -284,7 +288,7 @@ def _execute(name: str, payload: dict[str, Any] | None) -> dict[str, Any]:
         }
     if name == "write_risk_store":
         results = [
-            bump_result(common_from_job(job), paths=paths, seed=seed, locvol=bool(payload.get("locvol", False)))
+            bump_result(common_from_job(job), paths=paths, seed=seed, locvol=bool(payload.get("locvol", True)))
             for job in jobs
         ]
         return write_risk_store(
