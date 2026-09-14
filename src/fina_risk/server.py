@@ -163,9 +163,10 @@ def _execute(name: str, payload: dict[str, Any] | None) -> dict[str, Any]:
     common = common_from_job(jobs[0]) if jobs else {}
     paths, seed = payload.get("paths"), int(payload.get("seed", 1729))
     if name == "pricing_and_sensitivity":
-        result = bump_result(common, paths=paths, seed=seed)
+        locvol = bool(payload.get("locvol", False))
+        result = bump_result(common, paths=paths, seed=seed, locvol=locvol)
         if len(jobs) >= 3:
-            coupon = price_fixture(common_from_job(jobs[2]), paths=paths, seed=seed)
+            coupon = price_fixture(common_from_job(jobs[2]), paths=paths, seed=seed, locvol=locvol)
             coupon_pv = next(x["pv"] for x in coupon["legs"] if x["leg_name"] == "COUPON")
             result["base"]["legs"][-1]["pv"] = coupon_pv
             result["base"]["valuation"]["pv"] = sum(x["pv"] for x in result["base"]["legs"])
@@ -238,7 +239,7 @@ def _execute(name: str, payload: dict[str, Any] | None) -> dict[str, Any]:
             },
         }
     if name == "build_path_cube":
-        r = price_fixture(common, paths=paths, seed=seed)
+        r = price_fixture(common, paths=paths, seed=seed, locvol=bool(payload.get("locvol", False)))
         return {
             "cube_id": r["artifacts"]["path_cube_id"],
             "universe_id": r["artifacts"]["simulation_universe_id"],
@@ -268,7 +269,10 @@ def _execute(name: str, payload: dict[str, Any] | None) -> dict[str, Any]:
             "note": "GPU adapter is lower priority; DTOs are batch-ready.",
         }
     if name in {"aggregate_portfolio", "net_sensitivities", "aggregate_risk"}:
-        results = [bump_result(common_from_job(job), paths=paths, seed=seed) for job in jobs]
+        results = [
+            bump_result(common_from_job(job), paths=paths, seed=seed, locvol=bool(payload.get("locvol", False)))
+            for job in jobs
+        ]
         aggregated = aggregate_risk_views(results)
         return {
             "status": "ok",
@@ -279,7 +283,10 @@ def _execute(name: str, payload: dict[str, Any] | None) -> dict[str, Any]:
             "long": aggregated["long"],
         }
     if name == "write_risk_store":
-        results = [bump_result(common_from_job(job), paths=paths, seed=seed) for job in jobs]
+        results = [
+            bump_result(common_from_job(job), paths=paths, seed=seed, locvol=bool(payload.get("locvol", False)))
+            for job in jobs
+        ]
         return write_risk_store(
             [x["risk_representation"] for x in results],
             root=payload.get("root"),

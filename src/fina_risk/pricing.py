@@ -18,6 +18,7 @@ import numpy as np
 
 from .aad import aad_put_sensitivity
 from .correlation import lookup_pairwise
+from .locvol import build_locvol_map
 from .risk_view import build_risk_views
 
 EXCEL_EPOCH = date(1899, 12, 30)
@@ -49,6 +50,7 @@ class Market:
     evaluation_date: int
     paths: int
     seed: int
+    locvol: dict[str, Any] | None = None
 
 
 def _parse_vol(market_data: dict[str, Any], name: str) -> float:
@@ -140,7 +142,8 @@ def resolved_correlation(names: tuple[str, ...], market_corr: float = 0.0) -> tu
 
 
 def market_from_legacy(
-    common: dict[str, Any], *, paths: int | None = None, seed: int = 1729, spots: list[float] | None = None
+    common: dict[str, Any], *, paths: int | None = None, seed: int = 1729, spots: list[float] | None = None,
+    locvol: bool = False,
 ) -> Market:
     md = common.get("marketData", common)
     equities = md.get("equity", [])
@@ -159,6 +162,11 @@ def market_from_legacy(
     curves = md.get("discCurves", [])
     rates = curves[0].get("curve", []) if curves else []
     rate = float(rates[0]["rate"]) if rates else 0.0
+    locvols = (
+        build_locvol_map(md, names, int(md.get("evaluationDate", 0)), rate)
+        if locvol
+        else None
+    )
     return Market(
         (names[0], names[1]),
         quoted,
@@ -169,6 +177,7 @@ def market_from_legacy(
         int(md.get("evaluationDate", 0)),
         int(paths or md.get("MCPara", {}).get("numPaths", 30000)),
         seed,
+        locvol=locvols,
     )
 
 
@@ -180,11 +189,40 @@ def _simulate(market: Market, expiry_date: int, *, steps: int = 194) -> tuple[np
     z1 = rng.standard_normal((market.paths, steps), dtype=np.float64)
     z2 = rng.standard_normal((market.paths, steps), dtype=np.float64)
     z2 = market.correlation * z1 + math.sqrt(max(1.0 - market.correlation**2, 0.0)) * z2
+    if market.locvol:
+        return _simulate_locvol(market, dt, z1, z2)
     drift = (market.rate - 0.5 * market.vols**2) * dt
     scale = market.vols * math.sqrt(dt)
     log1 = np.log(market.quoted_spots[0]) + np.cumsum(drift[0] + scale[0] * z1, axis=1)
     log2 = np.log(market.quoted_spots[1]) + np.cumsum(drift[1] + scale[1] * z2, axis=1)
     return np.exp(log1[:, -1]), np.exp(log2[:, -1]), np.stack((log1, log2), axis=2)
+
+
+def _simulate_locvol(
+    market: Market, dt: float, z1: np.ndarray, z2: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Euler-Maruyama under a state-dependent local vol: sigma(t, S_t) sampled
+    per step from the Dupire surface.  Reuses the same decorrelated standard
+    normals as the scalar lane so CRN bumping stays path-for-path comparable."""
+    steps = z1.shape[1]
+    log_s = np.broadcast_to(np.log(market.quoted_spots)[None, :], (market.paths, 2)).copy()
+    cube = np.empty((market.paths, steps, 2), dtype=np.float64)
+    lvmap = market.locvol or {}
+    lv0 = lvmap.get(market.names[0])
+    lv1 = lvmap.get(market.names[1])
+    sqrt_dt = math.sqrt(dt)
+    for s in range(steps):
+        t_s = s * dt
+        sig0: np.ndarray = np.full(market.paths, market.vols[0], dtype=float)
+        sig1: np.ndarray = np.full(market.paths, market.vols[1], dtype=float)
+        if lv0 is not None:
+            sig0 = lv0.sigma(t_s, np.exp(log_s[:, 0]))
+        if lv1 is not None:
+            sig1 = lv1.sigma(t_s, np.exp(log_s[:, 1]))
+        log_s[:, 0] += (market.rate - 0.5 * sig0**2) * dt + sig0 * sqrt_dt * z1[:, s]
+        log_s[:, 1] += (market.rate - 0.5 * sig1**2) * dt + sig1 * sqrt_dt * z2[:, s]
+        cube[:, s, :] = np.exp(log_s)
+    return cube[:, -1, 0], cube[:, -1, 1], np.log(cube)
 
 
 def price_terminal_legs(
@@ -324,10 +362,11 @@ def price_fixture(
     seed: int = 1729,
     spots: list[float] | None = None,
     steps: int = 194,
+    locvol: bool = False,
 ) -> dict[str, Any]:
     deal = common["dealData"]
     md = common["marketData"]
-    market = market_from_legacy(common, paths=paths, seed=seed, spots=spots)
+    market = market_from_legacy(common, paths=paths, seed=seed, spots=spots, locvol=locvol)
     expiry = int(deal.get("expiryDate", deal.get("maturityDate")))
     terminal1, terminal2, path_log = _simulate(market, expiry, steps=steps)
     refs = market.reference_spots
@@ -363,7 +402,8 @@ def price_fixture(
         "discount_factor": df,
         "pricing_kernel": kernel["pricing_kernel"],
         "explainability": {
-            "model": "correlated_gbm_terminal_reference_cpu",
+            "model": "dupire_locvol_terminal_reference_cpu" if market.locvol
+                      else "correlated_gbm_terminal_reference_cpu",
             "paths": market.paths,
             "steps": path_log.shape[1],
             "seed": seed,
@@ -448,9 +488,11 @@ def common_from_job(job: dict[str, Any]) -> dict[str, Any]:
     return common
 
 
-def bump_result(common: dict[str, Any], *, paths: int | None = None, seed: int = 1729) -> dict[str, Any]:
-    base = price_fixture(common, paths=paths, seed=seed)
-    market = market_from_legacy(common, paths=paths, seed=seed)
+def bump_result(
+    common: dict[str, Any], *, paths: int | None = None, seed: int = 1729, locvol: bool = False
+) -> dict[str, Any]:
+    base = price_fixture(common, paths=paths, seed=seed, locvol=locvol)
+    market = market_from_legacy(common, paths=paths, seed=seed, locvol=locvol)
     scenarios: list[dict[str, Any]] = [
         {"label": "base", "spots": market.quoted_spots.tolist(), "price": base["put_option_price"]}
     ]
@@ -461,7 +503,7 @@ def bump_result(common: dict[str, Any], *, paths: int | None = None, seed: int =
         for sign in (1, -1):
             shifted = market.quoted_spots.copy()
             shifted[i] += sign * bump
-            result = price_fixture(common, paths=paths, seed=seed, spots=shifted.tolist())
+            result = price_fixture(common, paths=paths, seed=seed, spots=shifted.tolist(), locvol=locvol)
             scenarios.append(
                 {"label": f"{name}:{sign:+d}%", "spots": shifted.tolist(), "price": result["put_option_price"]}
             )

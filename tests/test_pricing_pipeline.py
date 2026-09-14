@@ -87,3 +87,40 @@ def test_fixture_adapter_matches_shared_terminal_leg_kernel() -> None:
     )
     assert kernel["pricing_kernel"] == "price_terminal_legs.v1"
     assert kernel["valuation"]["pv"] == result["base"]["valuation"]["pv"]
+
+
+def test_locvol_flat_surface_collapses_to_scalar() -> None:
+    # A flat implied surface has dw/dT = sigma^2 and vanishing smile derivatives,
+    # so the Dupire local vol must equal the constant implied vol pointwise.
+    from fina_risk.locvol import LocalVolSurface
+
+    flat = [[30.0, 30.0, 30.0, 30.0, 30.0] for _ in range(3)]
+    surface = {"_id": "FLAT", "strike": [80.0, 90.0, 100.0, 110.0, 120.0],
+               "maturity": [30.0, 182.0, 365.0], "vol": flat}
+    lv = LocalVolSurface(surface, 0, 100.0, 0.0)
+    assert np.allclose(lv.sigma(0.5, np.array([70.0, 100.0, 130.0])), 0.30, atol=1e-9)
+
+
+def test_build_locvol_map_reads_fixture_surfaces_with_skew() -> None:
+    from fina_risk.locvol import build_locvol_map
+
+    md = json.loads(FIXTURE.read_text())["Chunk"]["Jobs"][0]["commonData"]["marketData"]
+    lv = build_locvol_map(md, ["ADBE UW", "AMZN UW"], int(md["evaluationDate"]), 0.037405)
+    assert set(lv) == {"ADBE UW", "AMZN UW"}
+    for name, surface in lv.items():
+        spot = next(float(e["spot"]) for e in md["equity"] if e["_id"] == name)
+        downside, atm = surface.sigma(0.5, np.array([spot * 0.7, spot]))
+        assert downside > atm  # equity skew: higher vol on the downside wing
+
+
+def test_locvol_lane_reprices_fixture_differently_from_scalar() -> None:
+    request = json.loads(FIXTURE.read_text())
+    scalar = _execute("pricing_and_sensitivity", {"request": request, "paths": 4000, "seed": 1729})["base"]
+    locvol = _execute(
+        "pricing_and_sensitivity", {"request": request, "paths": 4000, "seed": 1729, "locvol": True}
+    )["base"]
+    assert scalar["explainability"]["model"] == "correlated_gbm_terminal_reference_cpu"
+    assert locvol["explainability"]["model"] == "dupire_locvol_terminal_reference_cpu"
+    # Dupire sigma at the conservative wing is above the flat ATM scalar, so the
+    # short worst-of put is worth more under local vol.
+    assert locvol["put_option_price"] > scalar["put_option_price"]

@@ -21,10 +21,11 @@ def main() -> None:
     ap.add_argument("output")
     ap.add_argument("--paths", type=int, default=30000)
     ap.add_argument("--seed", type=int, default=1729)
+    ap.add_argument("--locvol", action="store_true", help="per-step Dupire local vol instead of flat scalar surface")
     args = ap.parse_args()
     root = json.loads(Path(args.fixture).read_text())
     common = common_from_job(load_legacy_request(root)[0])
-    market = market_from_legacy(common, paths=args.paths, seed=args.seed)
+    market = market_from_legacy(common, paths=args.paths, seed=args.seed, locvol=args.locvol)
     deal = common["dealData"]
     market_data = common["marketData"]
     refs = [float(x["spot"]) for x in deal["instrument"]["underlyings"][:2]]
@@ -50,7 +51,29 @@ def main() -> None:
     diffusion = vol_vec[None, None, :] * np.sqrt(dt) * shocks
     increments = drift + diffusion
     log_spots = np.log(market.quoted_spots)[None, None, :] + np.cumsum(increments, axis=1)
-    spots = np.exp(log_spots).astype(np.float64)
+    if args.locvol:
+        # Per-step Dupire local vol: sigma(t, S_t) sampled from the Dupire surface
+        # per observation, on the same CRN shocks as the scalar lane.
+        lv0 = market.locvol.get(market.names[0])
+        lv1 = market.locvol.get(market.names[1])
+        spots_lv = np.empty((args.paths, steps, 2), dtype=np.float64)
+        log_s = np.broadcast_to(np.log(market.quoted_spots)[None, :], (args.paths, 2)).copy()
+        for sstep in range(steps):
+            t_s = sstep * dt
+            if lv0 is None:
+                sig0 = np.full(args.paths, market.vols[0], dtype=float)
+            else:
+                sig0 = lv0.sigma(t_s, np.exp(log_s[:, 0]))
+            if lv1 is None:
+                sig1 = np.full(args.paths, market.vols[1], dtype=float)
+            else:
+                sig1 = lv1.sigma(t_s, np.exp(log_s[:, 1]))
+            sig_stack = np.stack((sig0, sig1), axis=1)
+            log_s += (market.rate - 0.5 * sig_stack**2) * dt + sig_stack * np.sqrt(dt) * shocks[:, sstep, :]
+            spots_lv[:, sstep, :] = np.exp(log_s)
+        spots = spots_lv
+    else:
+        spots = np.exp(log_spots).astype(np.float64)
     spots.tofile(args.output)
     meta = {
         "paths": args.paths,
