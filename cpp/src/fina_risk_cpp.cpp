@@ -79,17 +79,28 @@ using json = nlohmann::json;
 // How the code takes care of each feature:
 //   - Worst-of basket .......... every kernel takes min() over the basket
 //     performance ratios.
-//   - EKI knock-in at 78% ...... put = mean(max(strikeKI2 - worst, 0)); priced
-//     unconditionally over all paths as a conservative stand-in for the binary
-//     knock-in trigger (knock-in ⇔ worst <= KIBarrier on the final fixing).
-//   - KIBarrier 70% ............ surfaced as metadata; not a runtime gate here.
+//   - EKI knock-in at 78% ...... the fixture lane observes the worst-of ratio on
+//     the final fixing date only and pays max(strikeKI2 - worst, 0) *only* when
+//     worst <= KIBarrier (European knock-in). This is the faithful, conservative
+//     gate: paths that never touch the knock-in barrier receive nothing.
+//   - KIBarrier 70% ............ the runtime knock-in gate in `price_fixture`.
+//   - Vol surface .............. `price_fixture` interpolates the full eqVol
+//     grid (linear in strike; linear in total variance across maturities) at the
+//     exercise *and* knock-in moneyness and keeps the higher (downside-wing)
+//     vol per underlying, rather than a single ATM point.
+//   - NYSE calendar ............ fixing/observation dates come from
+//     `nyse_schedule` (Mon-Fri minus US market holidays), not every weekday.
+//   - Curve / dividends ........ the discount rate is interpolated to the option
+//     expiry and the GBM drift is (r - q) with q from the equity cash-dividend
+//     schedule.
 //   - Memory coupon N1/N2 ...... the RGACCLKO loop in price_fixture pays
 //     (N2 - N1)/N2 of each period's accruRate, scaled by the note denomination
 //     and discounted from paymentDate — the "accrued unpaid coupon" behaviour
 //     of a memory callable.
-//   - global/local KO .......... reflected economically through the locked
-//     coupon state N1 (which coupon periods are already gone) rather than by
-//     simulating the daily lock path.
+//   - global/local KO .......... the daily auto-call requires *all* underlyings
+//     at/above the 110% call barrier on the same fixing. Pre-locked memory state
+//     (GKOLocked) is intentionally NOT credited: under-detecting calls only
+//     raises the short-put reserve, which is the conservative sell-side choice.
 // ============================================================================
 // MODERN C++ QUICK REFERENCE (readers catching up on C++11 -> C++20)
 // This file is intentionally small but exercises the post-2011 idioms that
@@ -183,6 +194,173 @@ double get_number(const json& value, const char* key, double fallback) {
     // of an exception; `.get<double>()` exposes the typed conversion. The
     // `const json&` / `const char*` parameters avoid copying nodes/strings.
     return value.contains(key) && value[key].is_number() ? value[key].get<double>() : fallback;
+}
+
+// ---------------------------------------------------------------------------
+// Linear interpolation on a sorted x-grid (flat extrapolation at both ends).
+// Shared by the vol-surface (strike / maturity) and discount-curve reads.
+// ---------------------------------------------------------------------------
+inline double linear_interp(const std::vector<double>& xs, const std::vector<double>& ys, double x) {
+    if (xs.empty() || ys.empty()) return 0.0;
+    if (x <= xs.front()) return ys.front();
+    if (x >= xs.back()) return ys.back();
+    for (std::size_t k = 1; k < xs.size() && k < ys.size(); ++k) {
+        if (x <= xs[k]) {
+            const double span = xs[k] - xs[k - 1];
+            const double t = span == 0.0 ? 0.0 : (x - xs[k - 1]) / span;
+            return ys[k - 1] + t * (ys[k] - ys[k - 1]);
+        }
+    }
+    return ys.back();
+}
+
+// ---------------------------------------------------------------------------
+// US (NYSE) trading calendar. The term sheet's underlyings declare
+// `"calendar": "NYSE"`, so fixing/observation dates must exclude exchange
+// holidays rather than counting every Mon-Fri weekday. Serial dates are the
+// Excel 1900 system (same as Python's `date(1899,12,30) + serial`).
+// ---------------------------------------------------------------------------
+struct CivilDate {
+    int year{};
+    int month{};
+    int day{};
+};
+
+inline CivilDate civil_from_serial(int serial) {
+    // Howard Hinnant's days_from_civil inverse; z is days since 1970-01-01.
+    const long z = static_cast<long>(serial) - 25569L + 719468L;
+    const long era = (z >= 0 ? z : z - 146096L) / 146097L;
+    const unsigned doe = static_cast<unsigned>(z - era * 146097L);
+    const unsigned yoe = (doe - doe / 1460U + doe / 36524U - doe / 146096U) / 365U;
+    const int year = static_cast<int>(yoe) + static_cast<int>(era) * 400;
+    const unsigned doy = doe - (365U * yoe + yoe / 4U - yoe / 100U);
+    const unsigned mp = (5U * doy + 2U) / 153U;
+    const unsigned day = doy - (153U * mp + 2U) / 5U + 1U;
+    const unsigned month = mp + (mp < 10U ? 3U : static_cast<unsigned>(-9));
+    return {year + (month <= 2U ? 1 : 0), static_cast<int>(month), static_cast<int>(day)};
+}
+
+inline long days_from_civil(int year, unsigned month, unsigned day) {
+    year -= month <= 2U;
+    const long era = (year >= 0 ? year : year - 399) / 400;
+    const unsigned yoe = static_cast<unsigned>(year - era * 400);
+    const unsigned mp = month > 2U ? month - 3U : month + 9U;
+    const unsigned doy = (153U * mp + 2U) / 5U + day - 1U;
+    const unsigned doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;
+    return era * 146097L + static_cast<long>(doe) - 719468L;
+}
+
+inline int serial_from_ymd(int year, int month, int day) {
+    return static_cast<int>(days_from_civil(year, static_cast<unsigned>(month), static_cast<unsigned>(day)) + 25569L);
+}
+
+inline int weekday_mon0(int serial) {  // 0=Mon .. 6=Sun (1970-01-01 was a Thursday)
+    const long z = static_cast<long>(serial) - 25569L;
+    return static_cast<int>(((z % 7) + 10) % 7);
+}
+
+inline int observed_weekday(int year, int month, int day) {
+    const int serial = serial_from_ymd(year, month, day);
+    const int w = weekday_mon0(serial);
+    if (w == 5) return serial - 1;  // Saturday -> preceding Friday
+    if (w == 6) return serial + 1;  // Sunday -> following Monday
+    return serial;
+}
+
+inline int nth_weekday_of_month(int year, int month, int n, int target) {
+    const int first = serial_from_ymd(year, month, 1);
+    const int delta = (target - weekday_mon0(first) + 7) % 7;
+    return first + delta + (n - 1) * 7;
+}
+
+inline int last_weekday_of_month(int year, int month, int target) {
+    const int next_month = month == 12 ? 1 : month + 1;
+    const int next_year = month == 12 ? year + 1 : year;
+    const int last = serial_from_ymd(next_year, next_month, 1) - 1;
+    return last - ((weekday_mon0(last) - target + 7) % 7);
+}
+
+inline int easter_sunday(int year) {
+    // Anonymous Gregorian computus.
+    const int a = year % 19, b = year / 100, c = year % 100, d = b / 4, e = b % 4;
+    const int f = (b + 8) / 25, g = (b - f + 1) / 3, h = (19 * a + b - d - g + 15) % 30;
+    const int i = c / 4, k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7;
+    const int m = (a + 11 * h + 22 * l) / 451;
+    const int month = (h + l - 7 * m + 114) / 31;
+    const int day = ((h + l - 7 * m + 114) % 31) + 1;
+    return serial_from_ymd(year, month, day);
+}
+
+inline bool is_us_market_holiday(int serial) {
+    const CivilDate c = civil_from_serial(serial);
+    const int y = c.year;
+    if (serial == observed_weekday(y, 1, 1)) return true;              // New Year's Day
+    if (serial == nth_weekday_of_month(y, 1, 3, 0)) return true;        // MLK Day
+    if (serial == nth_weekday_of_month(y, 2, 3, 0)) return true;        // Washington's Birthday
+    if (serial == easter_sunday(y) - 2) return true;                    // Good Friday
+    if (serial == last_weekday_of_month(y, 5, 0)) return true;          // Memorial Day
+    if (y >= 2022 && serial == observed_weekday(y, 6, 19)) return true; // Juneteenth
+    if (serial == observed_weekday(y, 7, 4)) return true;               // Independence Day
+    if (serial == nth_weekday_of_month(y, 9, 1, 0)) return true;        // Labor Day
+    if (serial == nth_weekday_of_month(y, 11, 4, 3)) return true;       // Thanksgiving
+    if (serial == observed_weekday(y, 12, 25)) return true;             // Christmas
+    return false;
+}
+
+inline std::vector<int> nyse_schedule(int start, int end) {
+    std::vector<int> dates;
+    for (int serial = start; serial <= end; ++serial) {
+        if (weekday_mon0(serial) <= 4 && !is_us_market_holiday(serial)) dates.push_back(serial);
+    }
+    return dates;
+}
+
+// ---------------------------------------------------------------------------
+// Full eqVol surface read. The legacy grid is [maturity][strike] in percent.
+// Interpolate linearly across strikes and, across maturities, linearly in
+// *total variance* (sigma^2 * T) so the term structure is variance-consistent.
+// The conservative sell-side pick is the higher (downside-wing) of the vol at
+// the exercise and knock-in strikes.
+// ---------------------------------------------------------------------------
+inline double surface_vol(const json& surface, double strike_abs, int target_maturity, int eval) {
+    const auto strikes_json = surface.value("strike", json::array());
+    const auto maturities_json = surface.value("maturity", json::array());
+    const auto values = surface.value("vol", json::array());
+    if (strikes_json.empty() || values.empty()) return 0.45;
+    std::vector<double> strikes;
+    for (const auto& x : strikes_json) strikes.push_back(x.get<double>());
+    std::vector<double> row_vol;
+    std::vector<double> maturities;
+    for (const auto& x : maturities_json) maturities.push_back(x.get<double>());
+    for (const auto& row : values) {
+        std::vector<double> r;
+        for (const auto& x : row) r.push_back(x.get<double>() / 100.0);
+        row_vol.push_back(linear_interp(strikes, r, strike_abs));
+    }
+    if (maturities.size() != row_vol.size() || maturities.size() < 2) {
+        return row_vol.empty() ? 0.45 : row_vol.front();
+    }
+    std::vector<double> times, total_variance;
+    for (std::size_t k = 0; k < maturities.size(); ++k) {
+        const double t = std::max((maturities[k] - eval) / 365.0, 1e-6);
+        times.push_back(t);
+        total_variance.push_back(row_vol[k] * row_vol[k] * t);
+    }
+    const double target_t = std::max((target_maturity - eval) / 365.0, 1e-6);
+    const double w = linear_interp(times, total_variance, target_t);
+    return std::sqrt(std::max(w, 1e-12) / target_t);
+}
+
+inline double interp_curve_rate(const json& disc_curves, int target_maturity, int eval) {
+    if (!disc_curves.is_array() || disc_curves.empty()) return 0.0;
+    const auto curve = disc_curves.at(0).value("curve", json::array());
+    if (curve.empty()) return 0.0;
+    std::vector<double> times, rates;
+    for (const auto& pillar : curve) {
+        times.push_back((pillar.value("date", eval) - eval) / 365.0);
+        rates.push_back(pillar.value("rate", 0.0));
+    }
+    return linear_interp(times, rates, std::max((target_maturity - eval) / 365.0, 0.0));
 }
 
 std::vector<float> terminal_market(const json& market, std::size_t paths, std::uint64_t seed) {
@@ -303,25 +481,25 @@ RiskResult price_fixture(const std::string& request_json, std::size_t paths, std
     //   - Reference basket ......... dealData.instrument.underlyings[].spot
     //     (initial spots; e.g. 239.97 / 260.00); quoted spot overrides come
     //     from marketData.equity[].spot when revaluing at a later date.
-    //   - Exercise price (78%) ..... knockInStar.strikeKI2 (0.78).
+    //   - Exercise price (78%) ..... knockInStar.strikeKI2 (0.78); knock-in
+    //     price knockInStar.KIBarrier (0.70).
     //   - Time to expiry ........... (expiryDate - evaluationDate)/365, using
     //     dealData.expiryDate (Final Fixing Date 01 Feb 2027 in the sheet).
-    //   - Discount curve ........... marketData.discCurves[0].curve[0].rate
-    //     -> funding leg df = exp(-rate*time).
-    //   - Vol surface .............. nearest strike to quoted spot and nearest
-    //     maturity to evaluationDate + 0.40*365 (~5 months) on each eqVol
-    //     surface, values in percent divided by 100.
+    //   - Discount curve ........... marketData.discCurves[0].curve interpolated
+    //     linearly to the expiry (the old read took the shortest 1M pillar).
+    //   - Vol surface .............. full eqVol grid interpolated (linear in
+    //     strike; linear in total variance across maturities) at the exercise
+    //     and knock-in moneyness; the higher (downside-wing) vol is kept.
+    //   - Dividends ................ equity cash-dividend schedule over the
+    //     remaining life -> drift (r - q).
     //   - Correlation .............. marketData.corr[0].correlation[0].
     //     correlation, used to orthogonalise the two Gaussian drivers:
     //     z2 = rho*z1 + sqrt(1-rho^2)*z2'.
-    //   - MC scheme ................. correlated GBM with risk-neutral drift
-    //     (rate - 0.5*vol^2)*dt under the discount curve; steps clamp to
-    //     [2, 194] = round(time*252) trading days (the sheet has 9 periods
-    //     x ~21 days). EKI = European knock-in: the worst-of ratio is observed
-    //     at the terminal date only (Final Fixing Date), matching
-    //     knockInType="EKI". The knock-in trigger (KIBarrier=0.70) is not gated
-    //     here — the unconditional put below is the conservative version of the
-    //     physical-delivery payoff, see the top-of-file design overview.
+    //   - MC scheme ................. correlated GBM (drift (r-q-0.5*vol^2)*dt,
+    //     dt = 1/252) over the real NYSE trading calendar to the expiry. EKI =
+    //     European knock-in on the final fixing date only
+    //     (knockInType="EKI"); the put pays max(strikeKI2 - worst, 0) only when
+    //     worst <= KIBarrier and the note was not globally called.
     //   - Memory coupon ............. dealData.RGACCLKO: for each accrual
     //     period the paid/total coupon counts N1/N2 give the "accrued unpaid
     //     coupon" of the memory callable. `unpaid = max(N2 - N1, 0)` of this
@@ -359,71 +537,95 @@ RiskResult price_fixture(const std::string& request_json, std::size_t paths, std
             quoted[i] = get_number(equities[i], "spot", refs[i]);
     }
     const double strike = deal.value("knockInStar", json::object()).value("strikeKI2", 0.78);
+    const double ki_barrier = deal.value("knockInStar", json::object()).value("KIBarrier", 0.70);
+    const std::string knock_in_type = deal.value("KIKOSelect", json::object()).value("knockInType", std::string("EKI"));
+    // EKI = European knock-in observed on the final fixing date only. When the
+    // deal declares no knock-in type (funding/coupon legs) the put collapses to
+    // zero because those legs carry strikeKI2 = 0.
+    const bool european_knock_in = knock_in_type != "Continuous";
+    const double global_barrier = deal.value("RGACCLKO", json::object()).value("gblBarPrice", 1.10);
     const int evaluation_date = request.at("marketData").value("evaluationDate", 0);
     const int expiry_date = deal.value("expiryDate", deal.value("maturityDate", evaluation_date));
     const double time = std::max(expiry_date - evaluation_date, 0) / 365.0;
-    // (modern) the rate falls back through three nested ternaries; `const` +
-    // single assignment means the reader can reason about `rate` locally.
-    const double rate = request.at("marketData").value("discCurves", json::array()).empty()
-        ? 0.0 : request.at("marketData").at("discCurves").at(0).value("curve", json::array()).empty()
-            ? 0.0 : request.at("marketData").at("discCurves").at(0).at("curve").at(0).value("rate", 0.0);
+    // Curve interpolation to the option expiry (the legacy read took curve[0],
+    // the shortest 1M pillar, and used it for every maturity).
+    const double rate = interp_curve_rate(
+        request.at("marketData").value("discCurves", json::array()), expiry_date, evaluation_date);
     const double discount_factor = std::exp(-rate * time);
-    // (modern) fill constructor `vector(n, value)`: n copies of 0.45.
+    // Conservative full-surface read: interpolate the eqVol grid (linear in
+    // strike; linear in total variance across maturities) at both the exercise
+    // and knock-in moneyness and keep the higher (downside-wing) vol.
     std::vector<double> vols(refs.size(), 0.45);
-    if (request.at("marketData").contains("eqVol")) {
+    std::vector<double> dividends(refs.size(), 0.0);
+    if (request.at("marketData").contains("eqVol") && request.at("marketData").contains("equity")) {
         for (std::size_t i = 0; i < refs.size(); ++i) {
             for (const auto& surface : request.at("marketData").at("eqVol")) {
                 if (surface.value("_id", "") != request.at("marketData").at("equity").at(i).value("_id", "")) continue;
-                const auto values = surface.value("vol", json::array());
-                const auto strikes = surface.value("strike", json::array());
-                const auto maturities = surface.value("maturity", json::array());
-                std::size_t col = 0;
-                double best_strike_distance = 1.0e300;
-                for (std::size_t k = 0; k < strikes.size(); ++k) {
-                    const double distance = std::abs(strikes.at(k).get<double>() - quoted[i]);
-                    if (distance < best_strike_distance) { best_strike_distance = distance; col = k; }
-                }
-                std::size_t row = 0;
-                double best_maturity_distance = 1.0e300;
-                const double target_maturity = evaluation_date + 0.40 * 365.0;
-                for (std::size_t k = 0; k < maturities.size(); ++k) {
-                    const double distance = std::abs(maturities.at(k).get<double>() - target_maturity);
-                    if (distance < best_maturity_distance) { best_maturity_distance = distance; row = k; }
-                }
-                if (!values.empty() && values.at(row).is_array()) vols[i] = values.at(row).at(std::min(col, values.at(row).size() - 1)).get<double>() / 100.0;
+                const double exercise_strike = strike * refs[i];
+                const double knock_in_strike = ki_barrier * refs[i];
+                const double vol_exercise = surface_vol(surface, exercise_strike, expiry_date, evaluation_date);
+                const double knock_in_vol = surface_vol(surface, knock_in_strike, expiry_date, evaluation_date);
+                vols[i] = std::max(vol_exercise, knock_in_vol);
                 break;
             }
         }
     }
+    // Dividend yield from the equity cash-dividend schedule (ex-date in the
+    // remaining life), so the drift is (r - q) rather than r.
+    if (request.at("marketData").contains("equity")) {
+        for (std::size_t i = 0; i < refs.size(); ++i) {
+            const auto& equity = request.at("marketData").at("equity").at(i);
+            const auto it = equity.find("dividend");
+            double paid = 0.0;
+            if (it != equity.end() && it->is_array()) {
+                for (const auto& entry : *it) {
+                    const int ex_date = static_cast<int>(entry.value("exDate", 0));
+                    if (ex_date > evaluation_date && ex_date <= expiry_date) paid += entry.value("div", 0.0);
+                }
+            }
+            if (time > 0.0 && quoted[i] > 0.0) dividends[i] = paid / quoted[i] / time;
+        }
+    }
     double correlation = 0.0;
-    // (modern) decorrelated-shock idiom: because the payoff only needs the
-    // *terminal* worst ratio, the two Gaussian drivers can be generated
+    // (modern) decorrelated-shock idiom: two Gaussian drivers are generated
     // sequentially with Cholesky-style orthogonalisation z2 = rho*z1 +
     // sqrt(1-rho^2)*z2'. The `try/catch(...)` swallows a missing or badly
-    // shaped `corr` block (optional market data) — but note the ellipsis
-    // catches *every* exception, so keep it as narrow as the intent really is.
+    // shaped `corr` block (optional market data).
     try { correlation = request.at("marketData").at("corr").at(0).at("correlation").at(0).value("correlation", 0.0); }
     catch (...) { correlation = 0.0; }
     std::mt19937_64 rng(seed);
     std::normal_distribution<double> normal(0.0, 1.0);
     double put = 0.0;
-    // (modern) nested std::clamp via min/max; the inner value is *intentionally*
-    // int-cast (std::round returns double). `dt` is a plain scalar double.
-    const int steps = std::max(2, std::min(194, static_cast<int>(std::round(time * 252.0))));
-    const double dt = time / steps;
+    // Real NYSE fixing calendar (the term sheet references NYSE); dt = 1/252
+    // per trading day over the actual schedule length.
+    const std::vector<int> schedule = nyse_schedule(evaluation_date, expiry_date);
+    const int steps = std::max(2, static_cast<int>(schedule.size()));
+    const double dt = 1.0 / 252.0;
     const double orthogonal_scale = std::sqrt(std::max(1.0 - correlation * correlation, 0.0));
     for (std::size_t p = 0; p < paths; ++p) {
         std::vector<double> log_spot(quoted.size());
         for (std::size_t i = 0; i < quoted.size(); ++i) log_spot[i] = std::log(quoted[i]);
+        bool called = false;
         for (int step = 0; step < steps; ++step) {
             const double z1 = normal(rng);
             const double z2 = correlation * z1 + orthogonal_scale * normal(rng);
-            if (!log_spot.empty()) log_spot[0] += (rate - 0.5 * vols[0] * vols[0]) * dt + vols[0] * std::sqrt(dt) * z1;
-            if (log_spot.size() > 1) log_spot[1] += (rate - 0.5 * vols[1] * vols[1]) * dt + vols[1] * std::sqrt(dt) * z2;
+            // Conservative global-KO read: the daily auto-call requires every
+            // underlying at/above the 110% call barrier on the SAME fixing;
+            // pre-locked memory state is intentionally not credited (that only
+            // makes the call easier and would lower the reserve).
+            bool all_above = true;
+            for (std::size_t i = 0; i < quoted.size(); ++i) {
+                const double z = i == 0 ? z1 : z2;
+                log_spot[i] += (rate - dividends[i] - 0.5 * vols[i] * vols[i]) * dt
+                    + vols[i] * std::sqrt(dt) * z;
+                if (std::exp(log_spot[i]) / refs[i] < global_barrier) all_above = false;
+            }
+            if (all_above) called = true;
         }
         double worst = 10.0;
         for (std::size_t i = 0; i < refs.size(); ++i) worst = std::min(worst, std::exp(log_spot[i]) / refs[i]);
-        put += std::max(strike - worst, 0.0);
+        const bool knock_in = !european_knock_in || worst <= ki_barrier;
+        if (knock_in && !called) put += std::max(strike - worst, 0.0);
     }
     put = discount_factor * put / static_cast<double>(paths);
     double coupon = 0.0;
@@ -863,6 +1065,14 @@ namespace {
 // Compact per-instrument spec for the batched daily lane (all features on):
 // refs / strike / EKI barrier / global-call barrier / expiry, and the coupon
 // period schedule with lowRange/upRange + N1/N2. `market` carries rate + eval.
+// Schedule fields are optional and let a corpus vary the calendar per trade:
+//   - `ki_obs` .......... explicit EKI observation date (Excel serial); default
+//     is the expiry grid index, so the terminal observation can differ.
+//   - per-period `start`  first observation date (Excel serial) of the accrual
+//     window; replaces the legacy ~one-month tail when supplied.
+//   - per-period `stride`/`offset`  sample every k-th observation with a phase,
+//     giving daily / weekly / monthly schedules. All map into the one shared
+//     (paths, observations, underlyings) cube, so path sharing is preserved.
 struct CompactDaily {
     double pv{};
     double put{};
@@ -890,11 +1100,22 @@ CompactDaily price_daily_compact(const json& inst,
     std::size_t EO = static_cast<std::size_t>(std::upper_bound(dates.begin(), dates.end(), expiry) - dates.begin());
     if (EO == 0) EO = 1;
     if (EO > O) EO = O;
+    // Optional explicit EKI observation date (Excel serial). Defaults to the
+    // expiry grid index; lets a corpus carry instruments whose terminal
+    // observation is a different scheduled date.
+    std::size_t terminal_index = EO - 1;
+    const int ki_obs_date = inst.value("ki_obs", 0);
+    if (ki_obs_date > 0) {
+        const auto it = std::upper_bound(dates.begin(), dates.end(), ki_obs_date);
+        terminal_index = it == dates.begin() ? 0 : static_cast<std::size_t>(it - dates.begin() - 1);
+    }
+    if (terminal_index >= O) terminal_index = O - 1;
+    const std::size_t ko_end = std::min<std::size_t>(std::max(EO, terminal_index + 1), O);
     std::vector<char> ki(P, 0), ko(P, 0);
     std::vector<std::size_t> ko_step(P, O);
     std::vector<double> terminal_worst(P, 1.0);
     for (std::size_t p = 0; p < P; ++p) {
-        for (std::size_t o = 0; o < EO; ++o) {
+        for (std::size_t o = 0; o < ko_end; ++o) {
             bool all_above = true;
             for (std::size_t j = 0; j < U; ++j)
                 if (paths[(p * O + o) * U + j] / refs[j] < gkb) all_above = false;
@@ -902,9 +1123,9 @@ CompactDaily price_daily_compact(const json& inst,
         }
         double worst_t = 1.0e30;
         for (std::size_t j = 0; j < U; ++j)
-            worst_t = std::min(worst_t, paths[(p * O + (EO - 1)) * U + j] / refs[j]);
+            worst_t = std::min(worst_t, paths[(p * O + terminal_index) * U + j] / refs[j]);
         terminal_worst[p] = worst_t;
-        ki[p] = (worst_t <= kib) ? 1 : 0;  // EKI: final fixing only
+        ki[p] = (worst_t <= kib) ? 1 : 0;  // EKI: observed on the selected date
     }
     double put = 0.0;
     for (std::size_t p = 0; p < P; ++p)
@@ -916,6 +1137,9 @@ CompactDaily price_daily_compact(const json& inst,
     for (const auto& per : periods) {
         const int end = per.value("end", 0);
         const int pay = per.value("pay", end);
+        const int start_date = per.value("start", 0);
+        const int stride = std::max(1, per.value("stride", 1));
+        const int offset = per.value("offset", 0);
         const double prate = per.value("rate", 0.0);
         const int pn1 = per.value("n1", 0);
         const int pn2 = per.value("n2", 0);
@@ -925,10 +1149,21 @@ CompactDaily price_daily_compact(const json& inst,
         const auto it1 = std::upper_bound(dates.begin(), dates.end(), end);
         const std::size_t e = it1 == dates.begin() ? 0 : static_cast<std::size_t>(it1 - dates.begin() - 1);
         if (e > O) continue;
-        const std::size_t s = e < 20 ? 0 : e - 20;  // ~one month of observations
+        // Per-period observation window: an explicit start date when supplied,
+        // else the legacy ~one-month tail. `stride`/`offset` sample every k-th
+        // observation so a corpus can carry daily/weekly/monthly schedules.
+        std::size_t s = e < 20 ? 0 : e - 20;
+        if (start_date > 0) {
+            s = static_cast<std::size_t>(std::lower_bound(dates.begin(), dates.end(), start_date) - dates.begin());
+        }
+        if (s > e) s = e;
         for (std::size_t p = 0; p < P; ++p) {
             double count = 0.0;
             for (std::size_t o = s; o <= e && o < O; ++o) {
+                if (stride > 1) {
+                    const int phase = (static_cast<int>(o) - static_cast<int>(s) - offset) % stride;
+                    if ((phase + stride) % stride != 0) continue;
+                }
                 double worst = 1.0e30;
                 for (std::size_t j = 0; j < U; ++j)
                     worst = std::min(worst, paths[(p * O + o) * U + j] / refs[j]);

@@ -17,6 +17,7 @@ from typing import Any
 import numpy as np
 
 from .aad import aad_put_sensitivity
+from .correlation import lookup_pairwise
 from .risk_view import build_risk_views
 
 EXCEL_EPOCH = date(1899, 12, 30)
@@ -72,6 +73,72 @@ def _parse_vol(market_data: dict[str, Any], name: str) -> float:
     return float(np.nanmean(values)) / 100.0
 
 
+def _surface_vol_at(surface: dict[str, Any], strike_abs: float, target_maturity: float, eval_date: float) -> float:
+    """Interpolate one eqVol surface point: linear across strikes, and across
+    maturities linearly in total variance (sigma^2 * T). Mirrors the native
+    ``surface_vol`` helper in ``cpp/src/fina_risk_cpp.cpp``."""
+    strikes = np.asarray(surface.get("strike", []), dtype=float)
+    maturities = np.asarray(surface.get("maturity", []), dtype=float)
+    values = np.asarray(surface.get("vol", []), dtype=float) / 100.0
+    if strikes.size == 0 or values.size == 0:
+        return 0.45
+    row_vol = np.asarray([np.interp(strike_abs, strikes, values[r]) for r in range(values.shape[0])])
+    if maturities.size != row_vol.size or maturities.size < 2:
+        return float(row_vol[0])
+    times = np.maximum((maturities - eval_date) / 365.0, 1e-6)
+    total_variance = row_vol**2 * times
+    target_t = max((target_maturity - eval_date) / 365.0, 1e-6)
+    w = float(np.interp(target_t, times, total_variance))
+    return float(math.sqrt(max(w, 1e-12) / target_t))
+
+
+def conservative_surface_vols(
+    market_data: dict[str, Any],
+    names: tuple[str, ...] | list[str],
+    reference_spots: list[float],
+    strike_ratio: float,
+    ki_ratio: float,
+    expiry: float,
+) -> dict[str, float]:
+    """Sell-side conservative vol per underlying: read the full surface at both
+    the exercise and knock-in moneyness and keep the higher (downside-wing) vol,
+    instead of a single ATM nearest-strike point."""
+    eval_date = float(market_data.get("evaluationDate", 0))
+    surfaces = {s.get("_id"): s for s in market_data.get("eqVol", [])}
+    out: dict[str, float] = {}
+    for i, name in enumerate(names):
+        surface = surfaces.get(name)
+        if not surface:
+            out[name] = 0.45
+            continue
+        vol_exercise = _surface_vol_at(surface, strike_ratio * reference_spots[i], expiry, eval_date)
+        vol_knock_in = _surface_vol_at(surface, ki_ratio * reference_spots[i], expiry, eval_date)
+        out[name] = max(vol_exercise, vol_knock_in)
+    return out
+
+
+def _market_data_correlation(md: dict[str, Any]) -> float:
+    try:
+        return float(md["corr"][0]["correlation"][0]["correlation"])
+    except (KeyError, IndexError, TypeError):
+        return 0.0
+
+
+def resolved_correlation(names: tuple[str, ...], market_corr: float = 0.0) -> tuple[float, dict[str, Any]]:
+    """Resolve the traded legs' correlation from the lake store; fall back to the
+    market-data correlation when the pair is not in the table (or the table is
+    unavailable). Legs strip an exchange suffix ("ADBE UW" -> "ADBE")."""
+    legs = [name.split()[0] for name in names[:2]]
+    try:
+        lookup = lookup_pairwise(legs)
+    except Exception:  # pragma: no cover - defensive
+        return market_corr, {"source": "market_data"}
+    pair = frozenset(legs)
+    if pair in lookup:
+        return lookup[pair], {"source": "lake_corr_table", "legs": legs}
+    return market_corr, {"source": "market_data", "legs": legs}
+
+
 def market_from_legacy(
     common: dict[str, Any], *, paths: int | None = None, seed: int = 1729, spots: list[float] | None = None
 ) -> Market:
@@ -87,11 +154,8 @@ def market_from_legacy(
         reference = np.asarray([float(x["spot"]) for x in underlyings[:2]], dtype=float)
     if spots is not None:
         quoted = np.asarray(spots, dtype=float)
-    corr = 0.0
-    try:
-        corr = float(md["corr"][0]["correlation"][0]["correlation"])
-    except (KeyError, IndexError, TypeError):
-        corr = 0.0
+    corr = _market_data_correlation(md)
+    corr, _corr_meta = resolved_correlation(names, corr)
     curves = md.get("discCurves", [])
     rates = curves[0].get("curve", []) if curves else []
     rate = float(rates[0]["rate"]) if rates else 0.0

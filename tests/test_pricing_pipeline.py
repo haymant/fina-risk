@@ -14,7 +14,8 @@ def test_fixture_pricing_put_and_leg_sign() -> None:
         "pricing_and_sensitivity", {"request": json.loads(FIXTURE.read_text()), "paths": 30000, "seed": 1729}
     )
     base = result["base"]
-    assert abs(base["put_option_price"] - 0.02113) < 0.00015
+    # Lake-store correlation (ADBE-AMZN 0.4041) replaces the market-data value.
+    assert abs(base["put_option_price"] - 0.02143) < 0.00015
     assert base["put_leg_pv"] < 0
     assert abs(sum(x["pv"] for x in base["legs"]) - base["valuation"]["pv"]) < 1e-12
     assert base["explainability"]["ki_monitoring"] == "EKI"

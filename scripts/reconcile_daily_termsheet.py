@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from fina_risk.daily_termsheet import price_daily_termsheet, weekday_serials
+from fina_risk.daily_termsheet import nyse_serials, price_daily_termsheet
 from fina_risk.pricing import common_from_job, load_legacy_request
 
 
@@ -26,7 +26,7 @@ def main() -> None:
         for job in jobs:
             common = common_from_job(job)
             expiry = int(common["dealData"].get("expiryDate", common["dealData"].get("maturityDate")))
-            count = len(weekday_serials(int(common["marketData"]["evaluationDate"]), expiry))
+            count = len(nyse_serials(int(common["marketData"]["evaluationDate"]), expiry))
             rs.append(price_daily_termsheet(common, value[:, :count, :]))
         return rs[0].pv - rs[0].coupon_pv + rs[2].coupon_pv
 
@@ -34,7 +34,7 @@ def main() -> None:
     for job in jobs:
         common = common_from_job(job)
         expiry = int(common["dealData"].get("expiryDate", common["dealData"].get("maturityDate")))
-        count = len(weekday_serials(int(common["marketData"]["evaluationDate"]), expiry))
+        count = len(nyse_serials(int(common["marketData"]["evaluationDate"]), expiry))
         results.append(price_daily_termsheet(common, spots[:, :count, :]))
     first = results[0]
     coupon = results[2].coupon_pv if len(results) >= 3 else first.coupon_pv

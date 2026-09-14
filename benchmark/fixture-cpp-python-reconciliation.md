@@ -1,5 +1,13 @@
 # C++ / Python fixture reconciliation
 
+> Updated: the fixture correlation is no longer the market-data quote. The
+> ADBE-AMZN pair is resolved from the lake correlation store (ρ = **0.4041**)
+> and injected into the job pushed to both engines. Re-priced (30k, seed 1729,
+> `scripts/` pipeline): canonical PV py=1.4735064, cpp=1.4734669, Δ = 3.95e-05
+> (unchanged MC-model spread). The daily EKI lane reconciles exactly (residual
+> ~1e-14) — see `daily-termsheet-parity.md`. The rows below predate the
+> correlation lookup.
+
 The fixture contains three jobs. Canonical aggregation uses PUT and FUNDING from the first job and replaces its coupon with the separately priced coupon job. Dollar delta is defined as:
 
 `dollar_delta = normalized PV delta per $1 quoted spot × quoted spot × notional`

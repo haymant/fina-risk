@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import Any
 
 import numpy as np
@@ -25,11 +25,82 @@ class DailyTermsSheetResult:
 
 
 def weekday_serials(start: int, end: int) -> np.ndarray:
+    """Placeholder schedule: every Mon-Fri, exchange holidays NOT removed.
+
+    Kept for regression comparisons. New pricing work should use
+    :func:`nyse_serials`, which is the calendar the term sheet references.
+    """
     current = excel_date(start)
     finish = excel_date(end)
     values: list[int] = []
     while current <= finish:
         if current.weekday() < 5:
+            values.append((current - excel_date(0)).days)
+        current += timedelta(days=1)
+    return np.asarray(values, dtype=np.int64)
+
+
+def _nth_weekday(year: int, month: int, n: int, target: int) -> date:
+    first = date(year, month, 1)
+    delta = (target - first.weekday()) % 7
+    if n > 0:
+        return first + timedelta(days=delta + (n - 1) * 7)
+    # n < 0: last occurrence in the month
+    next_month = date(year + (month == 12), 1 if month == 12 else month + 1, 1)
+    last = next_month - timedelta(days=1)
+    return last - timedelta(days=(last.weekday() - target) % 7)
+
+
+def _easter_sunday(year: int) -> date:
+    a, b, c = year % 19, year // 100, year % 100
+    d, e = b // 4, b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = c // 4, c % 4
+    ell = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * ell) // 451
+    month = (h + ell - 7 * m + 114) // 31
+    day = ((h + ell - 7 * m + 114) % 31) + 1
+    return date(year, month, day)
+
+
+def _observed(day: date) -> date:
+    if day.weekday() == 5:
+        return day - timedelta(days=1)
+    if day.weekday() == 6:
+        return day + timedelta(days=1)
+    return day
+
+
+def us_market_holidays(year: int) -> set[date]:
+    """NYSE full-day closures. Mirrors ``is_us_market_holiday`` in the C++ lane."""
+    holidays = {
+        _observed(date(year, 1, 1)),
+        _nth_weekday(year, 1, 3, 0),   # MLK Day
+        _nth_weekday(year, 2, 3, 0),   # Washington's Birthday
+        _easter_sunday(year) - timedelta(days=2),  # Good Friday
+        _nth_weekday(year, 5, -1, 0),  # Memorial Day
+        _observed(date(year, 7, 4)),   # Independence Day
+        _nth_weekday(year, 9, 1, 0),   # Labor Day
+        _nth_weekday(year, 11, 4, 3),  # Thanksgiving
+        _observed(date(year, 12, 25)), # Christmas
+    }
+    if year >= 2022:
+        holidays.add(_observed(date(year, 6, 19)))  # Juneteenth
+    return holidays
+
+
+def nyse_serials(start: int, end: int) -> np.ndarray:
+    """NYSE trading days (Mon-Fri minus exchange holidays) as Excel serials."""
+    first, last = excel_date(start), excel_date(end)
+    holidays: set[date] = set()
+    for year in range(first.year, last.year + 1):
+        holidays |= us_market_holidays(year)
+    current = first
+    values: list[int] = []
+    while current <= last:
+        if current.weekday() < 5 and current not in holidays:
             values.append((current - excel_date(0)).days)
         current += timedelta(days=1)
     return np.asarray(values, dtype=np.int64)
@@ -45,14 +116,17 @@ def price_daily_termsheet(
         raise ValueError("daily_spots must have shape (paths, observations, underlyings)")
     evaluation = int(market["evaluationDate"])
     expiry = int(deal.get("expiryDate", deal.get("maturityDate")))
-    dates = weekday_serials(evaluation, expiry)
+    dates = nyse_serials(evaluation, expiry)
     if observations.shape[1] != dates.size:
         raise ValueError(f"daily path observations {observations.shape[1]} != schedule {dates.size}")
     refs = np.asarray([float(x["spot"]) for x in deal["instrument"]["underlyings"][:2]])
     performance = observations[:, :, :2] / refs[None, None, :]
     worst = performance.min(axis=2)
     ki_barrier = float(deal.get("knockInStar", {}).get("KIBarrier", 0.70))
-    ki_hit = np.any(worst <= ki_barrier, axis=1)
+    # EKI: European knock-in observed on the final fixing date only, mirroring
+    # the native daily kernel (`knockInType == "EKI"`). Continuous monitoring
+    # would instead be `np.any(worst <= ki_barrier, axis=1)`.
+    ki_hit = worst[:, -1] <= ki_barrier
     global_barrier = float(deal.get("RGACCLKO", {}).get("gblBarPrice", 1.10))
     global_ko = np.all(performance >= global_barrier, axis=2)
     ko_hit = np.any(global_ko, axis=1)

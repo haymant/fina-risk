@@ -2,23 +2,28 @@
 
 ## Result
 
-The earlier comparison reported **0.963979**, which is the valuation of only the first fixture job. The canonical server pipeline loads three jobs and uses the first job's PUT/FUNDING legs plus the third job's coupon leg. At 30,000 paths and seed 1729, the canonical total is **1.473866**.
+The earlier comparison reported **0.963979**, which is the valuation of only the first fixture job. The canonical server pipeline loads three jobs and uses the first job's PUT/FUNDING legs plus the third job's coupon leg. At 30,000 paths and seed 1729, the canonical total is **1.473506**.
+
+Correlation is no longer the market-data quote: the ADBE-AMZN pair is resolved
+from the lake correlation store (`correlations.parquet`, rho = **0.4041**,
+window 252, alpha 0.4) and substituted before pricing on both engines. The
+flat-rho 0.459325 fixture priced 1.4738664.
 
 | Calculation | PV |
 |---|---:|
-| First job: PUT + FUNDING | 0.9639793053 |
+| First job: PUT + FUNDING | 0.9636192147 |
 | Second job: FUNDING-only reference | 0.9848465484 |
 | Third job: FUNDING + COUPON | 1.4949355916 |
-| Canonical server aggregation | **1.4738664748** |
+| Canonical server aggregation | **1.4735063853** |
 
 The canonical aggregation is:
 
 ```text
-PUT       -0.0210691168
+PUT       -0.0214292069
 FUNDING    0.9850484222
 COUPON     0.5098871695
 --------------------------------
-TOTAL      1.4738664748
+TOTAL      1.4735063853
 ```
 
 The server intentionally takes the first job's PUT and funding legs and replaces its coupon leg with the coupon calculation from the third job. It does not sum all three job PVs, because the jobs represent separate calculation components of the same economic fixture rather than three independent trades.

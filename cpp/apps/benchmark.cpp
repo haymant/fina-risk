@@ -47,9 +47,11 @@ void run_fixture(const std::string& path, std::size_t paths, std::uint64_t seed)
     json output = {
         {"paths", paths}, {"seed", seed}, {"job_count", jobs.size()},
         {"pv", canonical_pv}, {"job_pvs", json::array()},
-        {"dollar_delta", json::array()}, {"backend", "cpp_fixture_reference"}
+        {"job_puts", json::array()},
+        {"dollar_delta", json::array()}, {"backend", "cpp_fixture_conservative_surface_nyse"}
     };
     for (const auto& result : base_results) output["job_pvs"].push_back(result.pv);
+    for (const auto& result : base_results) output["job_puts"].push_back(result.put_option_price);
 
     const auto& market = jobs.at(0).at("marketData");
     const auto& equities = market.at("equity");
