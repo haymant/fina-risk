@@ -26,6 +26,26 @@ def _root() -> Path:
     return root
 
 
+def _postgres_dsn() -> str | None:
+    return os.getenv("DATABASE_URL") or os.getenv("POSTGRES_URL")
+
+
+def _postgres_connection() -> Any:
+    import psycopg
+    from psycopg.rows import dict_row
+
+    return psycopg.connect(_postgres_dsn(), row_factory=dict_row)
+
+
+def _ensure_postgres_schema(conn: Any) -> None:
+    schema = Path(__file__).resolve().parents[1] / "schema" / "postgres.sql"
+    conn.execute(schema.read_text(encoding="utf-8"))
+
+
+def _use_postgres() -> bool:
+    return bool(_postgres_dsn())
+
+
 def _path(kind: str) -> Path:
     return _root() / f"{kind}.json"
 
@@ -74,6 +94,13 @@ def _migrate_json(db: sqlite3.Connection, kind: str, key_field: str) -> None:
 
 def _load(kind: str) -> list[dict[str, Any]]:
     key_field = {"scenarios": "scenario_key", "slices": "slice_key", "reports": "report_key"}[kind]
+    if _use_postgres():
+        with _postgres_connection() as conn:
+            _ensure_postgres_schema(conn)
+            rows = conn.execute(
+                "SELECT payload FROM riskcube_metadata WHERE kind = %s ORDER BY created_at, record_key", (kind,)
+            ).fetchall()
+            return [dict(row["payload"]) for row in rows]
     db = _db()
     try:
         _migrate_json(db, kind, key_field)
@@ -86,6 +113,21 @@ def _load(kind: str) -> list[dict[str, Any]]:
 
 
 def _insert(kind: str, key: str, record: dict[str, Any]) -> None:
+    if _use_postgres():
+        import psycopg
+        from psycopg.types.json import Jsonb
+
+        with _postgres_connection() as conn:
+            _ensure_postgres_schema(conn)
+            try:
+                conn.execute(
+                    "INSERT INTO riskcube_metadata(kind, record_key, payload, version_id, created_at) "
+                    "VALUES (%s, %s, %s, %s, to_timestamp(%s))",
+                    (kind, key, Jsonb(record), record.get("version_id"), int(record.get("created_at", 0))),
+                )
+            except psycopg.errors.UniqueViolation as error:
+                raise ValueError(f"{kind[:-1]} already exists: {key}") from error
+        return
     db = _db()
     try:
         _migrate_json(db, kind, {"scenarios": "scenario_key", "slices": "slice_key", "reports": "report_key"}[kind])
@@ -154,6 +196,39 @@ def create_report(request: dict[str, Any]) -> dict[str, Any]:
     group = str(request.get("configuration_group") or "sensitivity-pnl-taylor")
     if group not in CONFIG_GROUPS or not kinds.issubset(CONFIG_GROUPS[group]):
         raise ValueError(f"configuration group {group} does not include requested report kinds")
+    if _use_postgres():
+        from psycopg.types.json import Jsonb
+
+        with _postgres_connection() as conn:
+            _ensure_postgres_schema(conn)
+            conn.execute("SELECT pg_advisory_xact_lock(hashtext('fina-riskcube-report-version'))")
+            version_id = int(
+                conn.execute(
+                    "SELECT COALESCE(MAX(version_id), 0) + 1 AS next_version "
+                    "FROM riskcube_metadata WHERE kind = 'reports'"
+                ).fetchone()["next_version"]
+            )
+            epoch = int(time.time())
+            report_name = str(request.get("report_name") or slice_key)
+            record = {
+                "report_key": f"{report_name}-{epoch}-v{version_id}",
+                "version_id": version_id,
+                "slice_key": slice_key,
+                "evaluation_date": request.get("evaluation_date"),
+                "market_data_datetime": request.get("market_data_datetime"),
+                "configuration_group": group,
+                "report_kinds": sorted(kinds),
+                "status": "requested",
+                "created_at": epoch,
+                "provenance": request.get("provenance", {}),
+            }
+            _assert_metadata(record)
+            conn.execute(
+                "INSERT INTO riskcube_metadata(kind, record_key, payload, version_id, created_at) "
+                "VALUES (%s, %s, %s, %s, to_timestamp(%s))",
+                ("reports", record["report_key"], Jsonb(record), version_id, epoch),
+            )
+            return record
     db = _db()
     try:
         _migrate_json(db, "reports", "report_key")
