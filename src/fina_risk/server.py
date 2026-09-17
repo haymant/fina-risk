@@ -13,6 +13,7 @@ from starlette.responses import JSONResponse
 
 from . import etl, scheduler_adapter
 from .benchmarking import run_benchmark
+from .fcn_native import price_fcn_request
 from .gcs import load_local_env, object_store_status
 from .olap import link_view_state, query_ssrm, resolve_dataset_source, resolve_s3_uri, storage_status, write_risk_store
 from .pipeline import (
@@ -615,6 +616,28 @@ def run_etl_task(
         result.pop("instruments", None)
         result["out_path"] = out_path
     return result
+
+
+@mcp.tool(name="quote.price")
+def quote_price(
+    pricing_request: dict[str, Any],
+    process_id: str = "",
+) -> dict[str, Any]:
+    """Price an explicit canonical FCN request through the real native C++ lane.
+
+    This logical server-side operation accepts ``pricing-request.schema.json``
+    plus ``fcn_terms``.  It never reconstructs legacy ``Chunk.Jobs`` positions,
+    exposes a browser-selectable backend, or substitutes a Python mock result.
+    """
+    request = dict(pricing_request)
+    # FinAP persists the older RFQ-shaped request for trade compatibility. The
+    # canonical quote operation owns this one-way migration at the MCP
+    # boundary; the native engine still receives only the explicit contract.
+    if "fcn_terms" not in request and ("UnwindMapRaw" in request or "Chunk" in request):
+        request = etl.compile_fcn_native_request(request)
+    if process_id:
+        request["process_id"] = process_id
+    return price_fcn_request(request)
 
 
 @mcp.custom_route("/healthz", methods=["GET"])

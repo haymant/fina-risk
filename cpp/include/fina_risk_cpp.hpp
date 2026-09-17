@@ -50,7 +50,7 @@ struct BenchmarkResult {
     double price_mean{};
 };
 
-// Native non-MCP kernel shared by fixture pricing, risk and benchmark adapters.
+// Existing native ABI: terminal, benchmark, and legacy daily parity lanes.
 RiskResult price_terminal_legs(const std::vector<double>& terminal_spots,
                                const std::vector<double>& reference_spots,
                                double strike, double discount_factor,
@@ -65,22 +65,12 @@ BenchmarkResult run_benchmark(const std::string& instruments_json,
                               std::size_t paths = 30000,
                               std::uint64_t seed = 20260909);
 
-// C++ parity lane: identical math to parity_benchmark.cpp operating on a
-// caller-supplied shared float32 terminal cube. Accepts the augmented
-// instrument/market JSON schemas (`benchmark.instruments.v1.mcp` /
-// `benchmark.market.v1`) so the MCP backend chooses the executing parity.
 ParityResult run_cpp_parity(const std::string& instruments_json,
                             const std::string& market_json,
                             const std::vector<float>& terminal,
                             std::uint64_t seed = 20260909,
                             double bump = 0.01);
 
-// Faithful daily lifecycle lane: consumes a shared (paths, observations,
-// underlyings) spot cube and, per accrual period, counts the daily in-range
-// observations, nets out already-paid fixings (N1), carries memory, and gates
-// the cashflow on global KO. Knock-in is European (EKI, final fixing only).
-// Returns the canonical PV (PUT + FUNDING of job 0, COUPON of job 2) plus
-// relative delta/gamma by central bump revalue on the same daily cube.
 std::string run_daily_termsheet_json(const std::string& request_json,
                                      const std::vector<double>& paths,
                                      std::size_t paths_count,
@@ -89,10 +79,6 @@ std::string run_daily_termsheet_json(const std::string& request_json,
                                      const std::vector<int>& dates,
                                      double bump = 0.01);
 
-// Batched daily lifecycle lane: prices N compact instrument specs against one
-// shared daily cube (all features on — daily N1/N2 in-range fixings, memory
-// carry, global-KO accrual termination, EKI final-fixing worst-of put) and
-// returns aggregate checksums + throughput.
 std::string run_daily_termsheet_batch_json(const std::string& instruments_json,
                                            const std::string& market_json,
                                            const std::vector<double>& paths,
@@ -100,6 +86,15 @@ std::string run_daily_termsheet_batch_json(const std::string& instruments_json,
                                            std::size_t observations,
                                            std::size_t underlyings,
                                            const std::vector<int>& dates);
+
+// Canonical FCN/RakiPlus ABI. This accepts a validated pricing request with
+// explicit legs and terms; it never inspects legacy Chunk.Jobs positions.
+std::string run_fcn_rakiplus_json(const std::string& canonical_request_json,
+                                  const std::vector<double>& paths,
+                                  std::size_t paths_count,
+                                  std::size_t observations,
+                                  std::size_t underlyings,
+                                  const std::vector<int>& dates);
 
 std::string to_json(const BenchmarkResult& result);
 std::string to_json(const ParityResult& result);
