@@ -1,4 +1,5 @@
 #include "fina_risk_cpp.hpp"
+#include "fina_risk/engine.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -1233,6 +1234,16 @@ std::string run_daily_termsheet_batch_json(const std::string& instruments_json,
         {"instruments_per_second", n / std::max(elapsed, 1e-12)},
     };
     return out.dump(2);
+}
+
+std::string run_fcn_rakiplus_json(const std::string& canonical_request_json,
+                                  const std::vector<double>& paths,
+                                  std::size_t paths_count,
+                                  std::size_t observations,
+                                  std::size_t underlyings,
+                                  const std::vector<int>& dates) {
+    return fcn::price_canonical_request_json(
+        canonical_request_json, paths, paths_count, observations, underlyings, dates);
 }
 
 }  // namespace fina::risk

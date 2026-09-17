@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(fina_risk_cpp VERSION 0.1.0 LANGUAGES CXX)
+project(fina_risk_cpp VERSION 0.2.0 LANGUAGES CXX)
 
 option(FINA_RISK_BUILD_XAD_AAD "Build the native XAD reverse-mode AAD benchmark" OFF)
 
@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 if(NOT DEFINED CMAKE_POSITION_INDEPENDENT_CODE)
-  set(CMAKE_POSITION_INDEPENDENT_CODE ON)  # fina_risk_core links into the pybind shared object
+  set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 endif()
 
 find_package(nlohmann_json 3.11 REQUIRED)
@@ -19,10 +19,26 @@ find_package(duckdb QUIET)
 find_package(AWSSDK QUIET COMPONENTS s3)
 find_package(pybind11 QUIET)
 
-add_library(fina_risk_core src/fina_risk_cpp.cpp)
+add_library(fina_risk_core
+  src/fina_risk_cpp.cpp
+  src/fina_risk/engine.cpp
+  src/fina_risk/schedule.cpp
+  src/fina_risk/result_assembly.cpp
+  src/fina_risk/coupon.cpp
+  src/fina_risk/barriers.cpp
+  src/fina_risk/terminal_option.cpp
+  src/fina_risk/funding.cpp
+  src/fina_risk/settlement.cpp
+)
 target_include_directories(fina_risk_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(fina_risk_core PUBLIC nlohmann_json::nlohmann_json)
+# Semantic conformance is the native pricing contract; do not use fast-math to
+# change barrier equality or lifecycle branch behaviour.
 target_compile_options(fina_risk_core PRIVATE $<$<CONFIG:Release>:-O3;-march=native;-mtune=native;-ffast-math>)
+# The canonical lifecycle source must retain NaN/missing-fixing checks and
+# ordered barrier equality semantics. It is intentionally excluded from the
+# legacy benchmark's fast-math policy; the ABI-compatible lanes keep it.
+set_source_files_properties(src/fina_risk/engine.cpp PROPERTIES COMPILE_OPTIONS "-fno-fast-math")
 
 if (OpenMP_CXX_FOUND)
   target_link_libraries(fina_risk_core PUBLIC OpenMP::OpenMP_CXX)
@@ -40,22 +56,22 @@ endif()
 
 add_executable(fina-risk-cpp-benchmark apps/benchmark.cpp)
 target_link_libraries(fina-risk-cpp-benchmark PRIVATE fina_risk_core)
-target_compile_options(fina-risk-cpp-benchmark PRIVATE $<$<CONFIG:Release>:-O3;-march=native;-mtune=native;-ffast-math>)
+target_compile_options(fina-risk-cpp-benchmark PRIVATE $<$<CONFIG:Release>:-O3;-march=native;-mtune=native>)
 
 add_executable(fina-risk-cpp-e2e apps/e2e_benchmark.cpp)
 target_link_libraries(fina-risk-cpp-e2e PRIVATE fina_risk_core)
 if (OpenMP_CXX_FOUND)
   target_link_libraries(fina-risk-cpp-e2e PRIVATE OpenMP::OpenMP_CXX)
 endif()
-target_compile_options(fina-risk-cpp-e2e PRIVATE $<$<CONFIG:Release>:-O3;-march=native;-mtune=native;-ffast-math>)
+target_compile_options(fina-risk-cpp-e2e PRIVATE $<$<CONFIG:Release>:-O3;-march=native;-mtune=native>)
 
 add_executable(fina-risk-cpp-parity apps/parity_benchmark.cpp)
 target_link_libraries(fina-risk-cpp-parity PRIVATE fina_risk_core)
-target_compile_options(fina-risk-cpp-parity PRIVATE $<$<CONFIG:Release>:-O3;-march=native;-mtune=native;-ffast-math>)
+target_compile_options(fina-risk-cpp-parity PRIVATE $<$<CONFIG:Release>:-O3;-march=native;-mtune=native>)
 
 add_executable(fina-risk-cpp-daily-termsheet apps/daily_termsheet.cpp)
 target_link_libraries(fina-risk-cpp-daily-termsheet PRIVATE nlohmann_json::nlohmann_json)
-target_compile_options(fina-risk-cpp-daily-termsheet PRIVATE $<$<CONFIG:Release>:-O3;-march=native;-mtune=native;-ffast-math>)
+target_compile_options(fina-risk-cpp-daily-termsheet PRIVATE $<$<CONFIG:Release>:-O3;-march=native;-mtune=native>)
 
 if(FINA_RISK_BUILD_XAD_AAD)
   find_package(XAD CONFIG REQUIRED)
@@ -65,7 +81,7 @@ if(FINA_RISK_BUILD_XAD_AAD)
   target_include_directories(fina-risk-cpp-aad PRIVATE ${QUANTLIB_INCLUDE_DIR})
   target_link_libraries(fina-risk-cpp-aad PRIVATE XAD::xad ${QUANTLIB_LIBRARY})
   target_compile_definitions(fina-risk-cpp-aad PRIVATE FINA_RISK_HAS_QUANTLIB_XAD=1)
-  target_compile_options(fina-risk-cpp-aad PRIVATE $<$<CONFIG:Release>:-O3;-march=native;-mtune=native;-ffast-math>)
+  target_compile_options(fina-risk-cpp-aad PRIVATE $<$<CONFIG:Release>:-O3;-march=native;-mtune=native>)
 endif()
 
 if (pybind11_FOUND)

@@ -83,5 +83,24 @@ PYBIND11_MODULE(fina_risk_cpp, module) {
             return fina::risk::run_daily_termsheet_batch_json(instruments_json, market_json, flat, P, O, U, dt);
         },
         py::arg("instruments_json"), py::arg("market_json"), py::arg("paths"), py::arg("dates"));
+    // Canonical RFQ entrypoint: compile explicit pricing-request legs and
+    // fcn_terms once, then execute the real typed C++ lifecycle kernel.
+    module.def("price_fcn_rakiplus",
+        [](const std::string& canonical_request_json,
+           py::array_t<double, py::array::c_style | py::array::forcecast> paths,
+           py::array_t<int, py::array::c_style | py::array::forcecast> dates) {
+            auto buf = paths.request();
+            if (buf.ndim != 3) {
+                throw py::value_error("paths must be (paths, observations, underlyings)");
+            }
+            const std::size_t P = static_cast<std::size_t>(buf.shape[0]);
+            const std::size_t O = static_cast<std::size_t>(buf.shape[1]);
+            const std::size_t U = static_cast<std::size_t>(buf.shape[2]);
+            std::vector<double> flat(P * O * U);
+            std::memcpy(flat.data(), buf.ptr, flat.size() * sizeof(double));
+            std::vector<int> dt(dates.data(), dates.data() + dates.size());
+            return fina::risk::run_fcn_rakiplus_json(canonical_request_json, flat, P, O, U, dt);
+        },
+        py::arg("canonical_request_json"), py::arg("paths"), py::arg("dates"));
 }
 #endif
