@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 from jsonschema import Draft202012Validator
 
 from fina_risk.fcn_native import price_fcn_request
@@ -166,3 +168,11 @@ def test_stdio_mcp_quote_price_uses_native_engine() -> None:
     text = str(value)
     assert "cpp_fcn_rakiplus_v1" in text
     assert "python_mirror" not in text
+
+
+def test_quote_price_rejects_legacy_noncanonical_payload() -> None:
+    async def invoke() -> Any:
+        return await mcp.call_tool("quote.price", {"pricing_request": {"chunk": {}}, "process_id": "contract-test"})
+
+    with pytest.raises(ToolError, match="requires canonical fina-risk pricing-request fields"):
+        asyncio.run(invoke())
