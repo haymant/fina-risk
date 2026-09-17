@@ -34,7 +34,13 @@ _DATE_LIST_FIELDS = (
 def load_termsheet(source: str | Path | dict[str, Any] | None = None) -> dict[str, Any]:
     """Load a legacy term-sheet request from a path, or pass a dict through."""
     if isinstance(source, dict):
-        return copy.deepcopy(source)
+        termsheet = copy.deepcopy(source)
+        # Older FinAP persistence used a lowercase JSON key while the original
+        # Murex export uses ``Chunk``. The native engine never receives this
+        # wrapper; normalize it before legacy compilation.
+        if "Chunk" not in termsheet and isinstance(termsheet.get("chunk"), dict):
+            termsheet["Chunk"] = termsheet.pop("chunk")
+        return termsheet
     path = Path(source) if source else DEFAULT_TERMSHEET
     return json.loads(path.read_text())
 
