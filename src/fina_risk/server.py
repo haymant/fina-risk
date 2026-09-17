@@ -27,7 +27,16 @@ from .pipeline import (
 )
 from .pricing import bump_result, common_from_job, load_legacy_request, price_fixture
 from .risk_view import aggregate_risk_views
-from .riskcube import create_report, create_scenario, create_slice, get_report, list_reports, list_scenarios, list_slices, query_report
+from .riskcube import (
+    create_report,
+    create_scenario,
+    create_slice,
+    get_report,
+    list_reports,
+    list_scenarios,
+    list_slices,
+    query_report,
+)
 from .storage import (
     ALLOWED_STORES,
     clear_storage_override,

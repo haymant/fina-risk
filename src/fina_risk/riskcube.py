@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .olap import query_ssrm
+from .riskcube_reports import trigger_report as materialize_report
 
 REPORT_KINDS = {"risk", "pnl", "taylor", "forecast"}
 CONFIG_GROUPS = {
@@ -64,7 +65,10 @@ def _db() -> sqlite3.Connection:
         )
         """
     )
-    db.execute("CREATE INDEX IF NOT EXISTS riskcube_metadata_version ON riskcube_metadata(kind, json_extract(payload, '$.version_id'))")
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS riskcube_metadata_version "
+        "ON riskcube_metadata(kind, json_extract(payload, '$.version_id'))"
+    )
     db.commit()
     return db
 
@@ -154,6 +158,35 @@ def _assert_metadata(value: Any, path: str = "$") -> None:
             _assert_metadata(child, f"{path}.{key}")
 
 
+def _materialize_if_requested(request: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
+    """Materialize calculation rows without replacing the canonical metadata lifecycle."""
+    requests = request.get("requests")
+    if not isinstance(requests, list):
+        return record
+    materialized = materialize_report(
+        {
+            **request,
+            "report_name": record["report_key"],
+            "report_version": record["created_at"],
+            "report_kinds": record["report_kinds"],
+            "groups": request.get("groups") or [
+                {
+                    "name": record["configuration_group"],
+                    "group_by": ["instrument_id"],
+                    "measures": ["delta", "vega", "total_taylor_pnl"],
+                }
+            ],
+        }
+    )
+    return {
+        **record,
+        "status": "ready",
+        "rows": materialized.get("rows", 0),
+        "path": materialized.get("path"),
+        "partition": materialized.get("partition"),
+    }
+
+
 def create_slice(definition: dict[str, Any]) -> dict[str, Any]:
     key = str(definition.get("slice_key") or "").strip()
     if not key:
@@ -225,6 +258,7 @@ def create_report(request: dict[str, Any]) -> dict[str, Any]:
                 "created_at": epoch,
                 "provenance": request.get("provenance", {}),
             }
+            record = _materialize_if_requested(request, record)
             _assert_metadata(record)
             conn.execute(
                 "INSERT INTO riskcube_metadata(kind, record_key, payload, version_id, created_at) "
@@ -256,6 +290,7 @@ def create_report(request: dict[str, Any]) -> dict[str, Any]:
             "created_at": epoch,
             "provenance": request.get("provenance", {}),
         }
+        record = _materialize_if_requested(request, record)
         _assert_metadata(record)
         db.execute(
             "INSERT INTO riskcube_metadata(kind, record_key, payload, created_at) VALUES (?, ?, ?, ?)",
