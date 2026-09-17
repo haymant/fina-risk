@@ -38,7 +38,7 @@ def _postgres_connection() -> Any:
 
 
 def _ensure_postgres_schema(conn: Any) -> None:
-    schema = Path(__file__).resolve().parents[1] / "schema" / "postgres.sql"
+    schema = Path(__file__).resolve().parents[2] / "schema" / "postgres.sql"
     conn.execute(schema.read_text(encoding="utf-8"))
 
 
