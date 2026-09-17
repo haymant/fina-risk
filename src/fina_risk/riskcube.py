@@ -22,7 +22,14 @@ GENERATED_KEYS = {"value", "pv", "pnl", "delta", "gamma", "vega", "rho", "theta"
 
 
 def _root() -> Path:
-    root = Path(os.getenv("FINA_RISKCUBE_METADATA_ROOT", "/tmp/fina-riskcube-metadata"))
+    root = Path(
+        os.getenv("FINA_RISKCUBE_METADATA_ROOT")
+        or (
+            Path(os.environ["TAC_DATA_DIR"]) / "riskcube-metadata"
+            if os.getenv("TAC_DATA_DIR")
+            else "/tmp/fina-riskcube-metadata"
+        )
+    )
     root.mkdir(parents=True, exist_ok=True)
     return root
 

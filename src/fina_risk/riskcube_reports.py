@@ -22,7 +22,12 @@ def _safe(value: Any) -> str:
 
 
 def _root() -> Path:
-    return Path(os.getenv("TAC_LAKE_DIR") or os.getenv("FINA_OLAP_DATASET_ROOT") or "/tmp/tac-lake") / "reports"
+    return Path(
+        os.getenv("TAC_DATA_DIR")
+        or os.getenv("TAC_LAKE_DIR")
+        or os.getenv("FINA_OLAP_DATASET_ROOT")
+        or "/tmp/tac-lake"
+    ) / "reports"
 
 
 def _read_json(path: Path, fallback: Any) -> Any:
