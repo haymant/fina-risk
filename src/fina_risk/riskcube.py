@@ -25,8 +25,8 @@ def _root() -> Path:
     root = Path(
         os.getenv("FINA_RISKCUBE_METADATA_ROOT")
         or (
-            Path(os.environ["TAC_DATA_DIR"]) / "riskcube-metadata"
-            if os.getenv("TAC_DATA_DIR")
+            Path(os.getenv("TAC_DATA_DIR") or os.environ["TAC_LAKE_DIR"]) / "riskcube-metadata"
+            if os.getenv("TAC_DATA_DIR") or os.getenv("TAC_LAKE_DIR")
             else "/tmp/fina-riskcube-metadata"
         )
     )
