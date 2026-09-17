@@ -27,6 +27,7 @@ from .pipeline import (
 )
 from .pricing import bump_result, common_from_job, load_legacy_request, price_fixture
 from .risk_view import aggregate_risk_views
+from .riskcube import create_report, create_scenario, create_slice, get_report, list_reports, list_scenarios, list_slices, query_report
 from .storage import (
     ALLOWED_STORES,
     clear_storage_override,
@@ -124,6 +125,16 @@ TOOLS = {
         ("plan_pnl_forecast", "Plan shared-resource execution and cost for a P&L forecast."),
         ("trigger_pnl_forecast", "Run PV and sensitivities, then persist normalized risk results."),
         ("pipeline_state", "Create or update pipeline state for stdio or Redis-backed HTTP use."),
+    ],
+    "riskcube": [
+        ("riskcube_scenario_create", "Create a durable RiskCube scenario definition."),
+        ("riskcube_scenario_list", "List RiskCube scenario definitions."),
+        ("riskcube_slice_create", "Create a reusable slice of the current instrument universe."),
+        ("riskcube_slice_list", "List reusable RiskCube instrument slices."),
+        ("riskcube_report_trigger", "Create an immutable RiskCube report/version request."),
+        ("riskcube_report_list", "List RiskCube report metadata."),
+        ("riskcube_report_get", "Get RiskCube report metadata."),
+        ("riskcube_report_query", "Query a ready report through typed DuckDB SSRM semantics."),
     ],
     "scheduler": [
         ("submit_job", "Submit a local pricing job."),
@@ -616,6 +627,48 @@ def run_etl_task(
         result.pop("instruments", None)
         result["out_path"] = out_path
     return result
+
+
+@mcp.tool()
+def riskcube_scenario_create(definition: dict[str, Any]) -> dict[str, Any]:
+    return create_scenario(definition)
+
+
+@mcp.tool()
+def riskcube_scenario_list() -> dict[str, Any]:
+    return {"rows": list_scenarios()}
+
+
+@mcp.tool()
+def riskcube_slice_create(definition: dict[str, Any]) -> dict[str, Any]:
+    """Create metadata for a reusable slice; generated values are rejected."""
+    return create_slice(definition)
+
+
+@mcp.tool()
+def riskcube_slice_list() -> dict[str, Any]:
+    return {"rows": list_slices()}
+
+
+@mcp.tool()
+def riskcube_report_trigger(request: dict[str, Any]) -> dict[str, Any]:
+    """Request risk/pnl/taylor/forecast materialization with an incremental version id."""
+    return create_report(request)
+
+
+@mcp.tool()
+def riskcube_report_list() -> dict[str, Any]:
+    return {"rows": list_reports()}
+
+
+@mcp.tool()
+def riskcube_report_get(report_key: str) -> dict[str, Any]:
+    return get_report(report_key)
+
+
+@mcp.tool()
+def riskcube_report_query(report_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return query_report(report_key, payload)
 
 
 @mcp.tool(name="quote.price")

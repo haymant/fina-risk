@@ -26,6 +26,7 @@ def test_tool_specs_cover_skill_groups() -> None:
         "portfolio",
         "olap",
         "pipeline",
+        "riskcube",
         "scheduler",
     }
     assert len(ALL_TOOLS) > 40
@@ -44,6 +45,10 @@ def test_key_placeholder_tools_registered() -> None:
         "ingest_instruments",
         "ingest_market_data",
         "trigger_pnl_forecast",
+        "riskcube_scenario_create",
+        "riskcube_slice_create",
+        "riskcube_report_trigger",
+        "riskcube_report_query",
     )
     for required in required_tools:
         assert required in names
