@@ -630,6 +630,11 @@ def quote_price(
     exposes a browser-selectable backend, or substitutes a Python mock result.
     """
     request = dict(pricing_request)
+    # FinAP persists the older RFQ-shaped request for trade compatibility. The
+    # canonical quote operation owns this one-way migration at the MCP
+    # boundary; the native engine still receives only the explicit contract.
+    if "fcn_terms" not in request and ("UnwindMapRaw" in request or "Chunk" in request):
+        request = etl.compile_fcn_native_request(request)
     if process_id:
         request["process_id"] = process_id
     return price_fcn_request(request)
