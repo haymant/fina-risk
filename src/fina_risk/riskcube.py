@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import time
 from pathlib import Path
 from typing import Any
@@ -29,18 +30,72 @@ def _path(kind: str) -> Path:
     return _root() / f"{kind}.json"
 
 
-def _load(kind: str) -> list[dict[str, Any]]:
+def _db() -> sqlite3.Connection:
+    db = sqlite3.connect(_root() / "riskcube.db", timeout=30.0)
+    db.row_factory = sqlite3.Row
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS riskcube_metadata (
+            kind TEXT NOT NULL,
+            record_key TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (kind, record_key)
+        )
+        """
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS riskcube_metadata_version ON riskcube_metadata(kind, json_extract(payload, '$.version_id'))")
+    db.commit()
+    return db
+
+
+def _migrate_json(db: sqlite3.Connection, kind: str, key_field: str) -> None:
+    """One-way migration for metadata written by the original JSON implementation."""
+    if db.execute("SELECT 1 FROM riskcube_metadata WHERE kind = ? LIMIT 1", (kind,)).fetchone():
+        return
     path = _path(kind)
     if not path.exists():
-        return []
-    raw = json.loads(path.read_text())
-    return raw if isinstance(raw, list) else []
+        return
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(raw, list):
+        return
+    for row in raw:
+        if not isinstance(row, dict) or not row.get(key_field):
+            continue
+        db.execute(
+            "INSERT OR IGNORE INTO riskcube_metadata(kind, record_key, payload, created_at) VALUES (?, ?, ?, ?)",
+            (kind, str(row[key_field]), json.dumps(row, separators=(",", ":")), int(row.get("created_at", 0))),
+        )
+    db.commit()
 
 
-def _save(kind: str, rows: list[dict[str, Any]]) -> None:
-    tmp = _path(kind).with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(rows, indent=2, sort_keys=True))
-    tmp.replace(_path(kind))
+def _load(kind: str) -> list[dict[str, Any]]:
+    key_field = {"scenarios": "scenario_key", "slices": "slice_key", "reports": "report_key"}[kind]
+    db = _db()
+    try:
+        _migrate_json(db, kind, key_field)
+        rows = db.execute(
+            "SELECT payload FROM riskcube_metadata WHERE kind = ? ORDER BY created_at, record_key", (kind,)
+        ).fetchall()
+        return [json.loads(row["payload"]) for row in rows]
+    finally:
+        db.close()
+
+
+def _insert(kind: str, key: str, record: dict[str, Any]) -> None:
+    db = _db()
+    try:
+        _migrate_json(db, kind, {"scenarios": "scenario_key", "slices": "slice_key", "reports": "report_key"}[kind])
+        db.execute(
+            "INSERT INTO riskcube_metadata(kind, record_key, payload, created_at) VALUES (?, ?, ?, ?)",
+            (kind, key, json.dumps(record, separators=(",", ":")), int(record.get("created_at", 0))),
+        )
+        db.commit()
+    finally:
+        db.close()
 
 
 def _assert_metadata(value: Any, path: str = "$") -> None:
@@ -58,13 +113,12 @@ def create_slice(definition: dict[str, Any]) -> dict[str, Any]:
     key = str(definition.get("slice_key") or "").strip()
     if not key:
         raise ValueError("slice_key is required")
-    rows = _load("slices")
-    if any(str(row.get("slice_key")) == key for row in rows):
-        raise ValueError(f"slice already exists: {key}")
     record = {**definition, "slice_key": key, "status": "draft", "created_at": int(time.time())}
     _assert_metadata(record)
-    rows.append(record)
-    _save("slices", rows)
+    try:
+        _insert("slices", key, record)
+    except sqlite3.IntegrityError as error:
+        raise ValueError(f"slice already exists: {key}") from error
     return record
 
 
@@ -76,13 +130,12 @@ def create_scenario(definition: dict[str, Any]) -> dict[str, Any]:
     key = str(definition.get("scenario_key") or "").strip()
     if not key:
         raise ValueError("scenario_key is required")
-    rows = _load("scenarios")
-    if any(str(row.get("scenario_key")) == key for row in rows):
-        raise ValueError(f"scenario already exists: {key}")
     record = {**definition, "scenario_key": key, "status": "draft", "created_at": int(time.time())}
     _assert_metadata(record)
-    rows.append(record)
-    _save("scenarios", rows)
+    try:
+        _insert("scenarios", key, record)
+    except sqlite3.IntegrityError as error:
+        raise ValueError(f"scenario already exists: {key}") from error
     return record
 
 
@@ -101,27 +154,39 @@ def create_report(request: dict[str, Any]) -> dict[str, Any]:
     group = str(request.get("configuration_group") or "sensitivity-pnl-taylor")
     if group not in CONFIG_GROUPS or not kinds.issubset(CONFIG_GROUPS[group]):
         raise ValueError(f"configuration group {group} does not include requested report kinds")
-    rows = _load("reports")
-    used = [int(row.get("version_id", 0)) for row in rows]
-    version_id = max(used, default=0) + 1
-    epoch = int(time.time())
-    report_name = str(request.get("report_name") or slice_key)
-    record = {
-        "report_key": f"{report_name}-{epoch}",
-        "version_id": version_id,
-        "slice_key": slice_key,
-        "evaluation_date": request.get("evaluation_date"),
-        "market_data_datetime": request.get("market_data_datetime"),
-        "configuration_group": group,
-        "report_kinds": sorted(kinds),
-        "status": "requested",
-        "created_at": epoch,
-        "provenance": request.get("provenance", {}),
-    }
-    _assert_metadata(record)
-    rows.append(record)
-    _save("reports", rows)
-    return record
+    db = _db()
+    try:
+        _migrate_json(db, "reports", "report_key")
+        db.execute("BEGIN IMMEDIATE")
+        version_id = int(
+            db.execute(
+                "SELECT COALESCE(MAX(json_extract(payload, '$.version_id')), 0) + 1 "
+                "FROM riskcube_metadata WHERE kind = 'reports'"
+            ).fetchone()[0]
+        )
+        epoch = int(time.time())
+        report_name = str(request.get("report_name") or slice_key)
+        record = {
+            "report_key": f"{report_name}-{epoch}-v{version_id}",
+            "version_id": version_id,
+            "slice_key": slice_key,
+            "evaluation_date": request.get("evaluation_date"),
+            "market_data_datetime": request.get("market_data_datetime"),
+            "configuration_group": group,
+            "report_kinds": sorted(kinds),
+            "status": "requested",
+            "created_at": epoch,
+            "provenance": request.get("provenance", {}),
+        }
+        _assert_metadata(record)
+        db.execute(
+            "INSERT INTO riskcube_metadata(kind, record_key, payload, created_at) VALUES (?, ?, ?, ?)",
+            ("reports", record["report_key"], json.dumps(record, separators=(",", ":")), epoch),
+        )
+        db.commit()
+        return record
+    finally:
+        db.close()
 
 
 def list_reports() -> list[dict[str, Any]]:
