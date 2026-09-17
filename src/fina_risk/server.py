@@ -13,6 +13,7 @@ from starlette.responses import JSONResponse
 
 from . import etl, scheduler_adapter
 from .benchmarking import run_benchmark
+from .fcn_native import price_fcn_request
 from .gcs import load_local_env, object_store_status
 from .olap import link_view_state, query_ssrm, resolve_dataset_source, resolve_s3_uri, storage_status, write_risk_store
 from .pipeline import (
@@ -26,16 +27,7 @@ from .pipeline import (
 )
 from .pricing import bump_result, common_from_job, load_legacy_request, price_fixture
 from .risk_view import aggregate_risk_views
-from .riskcube_reports import (
-    get_report,
-    list_reports,
-    query_report,
-    scenario_create,
-    scenario_list,
-    slice_create,
-    slice_list,
-    trigger_report,
-)
+from .riskcube import create_report, create_scenario, create_slice, get_report, list_reports, list_scenarios, list_slices, query_report
 from .storage import (
     ALLOWED_STORES,
     clear_storage_override,
@@ -133,14 +125,16 @@ TOOLS = {
         ("plan_pnl_forecast", "Plan shared-resource execution and cost for a P&L forecast."),
         ("trigger_pnl_forecast", "Run PV and sensitivities, then persist normalized risk results."),
         ("pipeline_state", "Create or update pipeline state for stdio or Redis-backed HTTP use."),
-        ("riskcube_scenario_create", "Create or replace a RiskCube scenario definition."),
+    ],
+    "riskcube": [
+        ("riskcube_scenario_create", "Create a durable RiskCube scenario definition."),
         ("riskcube_scenario_list", "List RiskCube scenario definitions."),
-        ("riskcube_slice_create", "Create or replace a RiskCube slice definition."),
-        ("riskcube_slice_list", "List RiskCube slice definitions."),
-        ("riskcube_report_trigger", "Generate and persist a versioned RiskCube report."),
-        ("riskcube_report_list", "List persisted RiskCube reports."),
-        ("riskcube_report_get", "Get one persisted RiskCube report."),
-        ("riskcube_report_query", "Read rows from one persisted RiskCube report."),
+        ("riskcube_slice_create", "Create a reusable slice of the current instrument universe."),
+        ("riskcube_slice_list", "List reusable RiskCube instrument slices."),
+        ("riskcube_report_trigger", "Create an immutable RiskCube report/version request."),
+        ("riskcube_report_list", "List RiskCube report metadata."),
+        ("riskcube_report_get", "Get RiskCube report metadata."),
+        ("riskcube_report_query", "Query a ready report through typed DuckDB SSRM semantics."),
     ],
     "scheduler": [
         ("submit_job", "Submit a local pricing job."),
@@ -336,30 +330,6 @@ def _execute(name: str, payload: dict[str, Any] | None) -> dict[str, Any]:
         return trigger_pnl_forecast(payload)
     if name == "pipeline_state":
         return pipeline_state(payload)
-    if name == "riskcube_scenario_list":
-        return {"status": "ok", "items": scenario_list()}
-    if name == "riskcube_scenario_create":
-        return {"status": "ok", "scenario": scenario_create(payload.get("definition") or payload)}
-    if name == "riskcube_slice_list":
-        return {"status": "ok", "items": slice_list()}
-    if name == "riskcube_slice_create":
-        return {"status": "ok", "slice": slice_create(payload.get("definition") or payload)}
-    if name == "riskcube_report_trigger":
-        return trigger_report(payload.get("request") or payload)
-    if name == "riskcube_report_list":
-        return {"status": "ok", "items": list_reports()}
-    if name == "riskcube_report_get":
-        report = get_report(
-            payload.get("report_id"),
-            payload.get("slice_key") or payload.get("sliceName"),
-            payload.get("version") or payload.get("reportVersion"),
-        )
-        return {"status": "ok", "report": report}
-    if name == "riskcube_report_query":
-        query = payload.get("payload") if isinstance(payload.get("payload"), dict) else payload
-        if payload.get("report_key") and isinstance(query, dict):
-            query = {**query, "report_id": query.get("report_id") or payload.get("report_key")}
-        return query_report(query)
     return {
         "status": "ok",
         "tool": name,
@@ -375,7 +345,6 @@ _ALL_PAYLOAD_KEYS = (
     "backend",
     "bump",
     "dataset",
-    "definition",
     "drillPath",
     "driverId",
     "endRow",
@@ -385,7 +354,6 @@ _ALL_PAYLOAD_KEYS = (
     "factors",
     "filterModel",
     "greeks",
-    "groups",
     "groupKeys",
     "instruments",
     "mcp_transport",
@@ -394,14 +362,8 @@ _ALL_PAYLOAD_KEYS = (
     "pivotCols",
     "pivotMode",
     "pnl",
-    "payload",
     "query",
     "records",
-    "requests",
-    "report_id",
-    "report_kinds",
-    "report_name",
-    "report_key",
     "reportVersion",
     "root",
     "rowGroupCols",
@@ -421,7 +383,20 @@ _ALL_PAYLOAD_KEYS = (
     "views",
 )
 
-for tool_name, description in ALL_TOOLS + [
+_CANONICAL_RISKCUBE_TOOLS = {
+    "riskcube_scenario_create",
+    "riskcube_scenario_list",
+    "riskcube_slice_create",
+    "riskcube_slice_list",
+    "riskcube_report_trigger",
+    "riskcube_report_list",
+    "riskcube_report_get",
+    "riskcube_report_query",
+}
+
+for tool_name, description in [
+    (name, description) for name, description in ALL_TOOLS if name not in _CANONICAL_RISKCUBE_TOOLS
+] + [
     ("pricing_and_sensitivity", "Price a legacy request and generate CRN sensitivities."),
     (
         "benchmark_portfolio",
@@ -437,7 +412,6 @@ for tool_name, description in ALL_TOOLS + [
         backend: Any = None,
         bump: Any = None,
         dataset: Any = None,
-        definition: Any = None,
         drillPath: Any = None,
         driverId: Any = None,
         endRow: Any = None,
@@ -447,7 +421,6 @@ for tool_name, description in ALL_TOOLS + [
         factors: Any = None,
         filterModel: Any = None,
         greeks: Any = None,
-        groups: Any = None,
         groupKeys: Any = None,
         instruments: Any = None,
         mcp_transport: Any = None,
@@ -456,14 +429,8 @@ for tool_name, description in ALL_TOOLS + [
         pivotCols: Any = None,
         pivotMode: Any = None,
         pnl: Any = None,
-        payload: Any = None,
         query: Any = None,
         records: Any = None,
-        requests: Any = None,
-        report_id: Any = None,
-        report_kinds: Any = None,
-        report_name: Any = None,
-        report_key: Any = None,
         reportVersion: Any = None,
         root: Any = None,
         rowGroupCols: Any = None,
@@ -673,6 +640,72 @@ def run_etl_task(
         result.pop("instruments", None)
         result["out_path"] = out_path
     return result
+
+
+@mcp.tool()
+def riskcube_scenario_create(definition: dict[str, Any]) -> dict[str, Any]:
+    return create_scenario(definition)
+
+
+@mcp.tool()
+def riskcube_scenario_list() -> dict[str, Any]:
+    return {"rows": list_scenarios()}
+
+
+@mcp.tool()
+def riskcube_slice_create(definition: dict[str, Any]) -> dict[str, Any]:
+    """Create metadata for a reusable slice; generated values are rejected."""
+    return create_slice(definition)
+
+
+@mcp.tool()
+def riskcube_slice_list() -> dict[str, Any]:
+    return {"rows": list_slices()}
+
+
+@mcp.tool()
+def riskcube_report_trigger(request: dict[str, Any]) -> dict[str, Any]:
+    """Request risk/pnl/taylor/forecast materialization with an incremental version id."""
+    return create_report(request)
+
+
+@mcp.tool()
+def riskcube_report_list() -> dict[str, Any]:
+    return {"rows": list_reports()}
+
+
+@mcp.tool()
+def riskcube_report_get(report_key: str) -> dict[str, Any]:
+    return get_report(report_key)
+
+
+@mcp.tool()
+def riskcube_report_query(report_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return query_report(report_key, payload)
+
+
+@mcp.tool(name="quote.price")
+def quote_price(
+    pricing_request: dict[str, Any],
+    process_id: str = "",
+) -> dict[str, Any]:
+    """Price an explicit canonical FCN request through the real native C++ lane.
+
+    This logical server-side operation accepts ``pricing-request.schema.json``
+    plus ``fcn_terms``.  It never reconstructs legacy ``Chunk.Jobs`` positions,
+    exposes a browser-selectable backend, or substitutes a Python mock result.
+    """
+    request = dict(pricing_request)
+    required = {"instrument_key", "market_data", "legs", "parameters", "fcn_terms"}
+    missing = sorted(required - request.keys())
+    if missing:
+        raise ValueError(
+            "quote.price requires canonical fina-risk pricing-request fields; "
+            f"missing: {', '.join(missing)}"
+        )
+    if process_id:
+        request["process_id"] = process_id
+    return price_fcn_request(request)
 
 
 @mcp.custom_route("/healthz", methods=["GET"])
