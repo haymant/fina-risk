@@ -383,7 +383,20 @@ _ALL_PAYLOAD_KEYS = (
     "views",
 )
 
-for tool_name, description in ALL_TOOLS + [
+_CANONICAL_RISKCUBE_TOOLS = {
+    "riskcube_scenario_create",
+    "riskcube_scenario_list",
+    "riskcube_slice_create",
+    "riskcube_slice_list",
+    "riskcube_report_trigger",
+    "riskcube_report_list",
+    "riskcube_report_get",
+    "riskcube_report_query",
+}
+
+for tool_name, description in [
+    (name, description) for name, description in ALL_TOOLS if name not in _CANONICAL_RISKCUBE_TOOLS
+] + [
     ("pricing_and_sensitivity", "Price a legacy request and generate CRN sensitivities."),
     (
         "benchmark_portfolio",
