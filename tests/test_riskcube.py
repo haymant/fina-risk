@@ -36,6 +36,17 @@ def test_generated_values_are_not_metadata_json(tmp_path, monkeypatch):
         riskcube.create_slice({"slice_key": "bad", "delta": 1.0})
 
 
+def test_slice_condition_value_is_metadata_input(tmp_path, monkeypatch):
+    monkeypatch.setenv("FINA_RISKCUBE_METADATA_ROOT", str(tmp_path))
+    record = riskcube.create_slice(
+        {
+            "slice_key": "fcn-only",
+            "conditions": [{"field": "product_type", "op": "eq", "value": "FCN"}],
+        }
+    )
+    assert record["conditions"][0]["value"] == "FCN"
+
+
 def test_configuration_group_rejects_unselected_report_kind(tmp_path, monkeypatch):
     monkeypatch.setenv("FINA_RISKCUBE_METADATA_ROOT", str(tmp_path))
     with pytest.raises(ValueError, match="does not include"):
