@@ -47,6 +47,24 @@ def test_slice_condition_value_is_metadata_input(tmp_path, monkeypatch):
     assert record["conditions"][0]["value"] == "FCN"
 
 
+def test_scenario_manipulation_value_is_metadata_input(tmp_path, monkeypatch):
+    monkeypatch.setenv("FINA_RISKCUBE_METADATA_ROOT", str(tmp_path))
+    record = riskcube.create_scenario(
+        {
+            "scenario_key": "spot-shift",
+            "market_data_manipulations": [
+                {
+                    "type": "spot",
+                    "underlying_name": "AAPL",
+                    "shift_type": "relative",
+                    "value": 0.05,
+                }
+            ],
+        }
+    )
+    assert record["market_data_manipulations"][0]["value"] == 0.05
+
+
 def test_configuration_group_rejects_unselected_report_kind(tmp_path, monkeypatch):
     monkeypatch.setenv("FINA_RISKCUBE_METADATA_ROOT", str(tmp_path))
     with pytest.raises(ValueError, match="does not include"):

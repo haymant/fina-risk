@@ -146,8 +146,8 @@ def _assert_metadata(value: Any, path: str = "$") -> None:
             _assert_metadata(child, f"{path}[{i}]")
     elif isinstance(value, dict):
         for key, child in value.items():
-            is_input_value = key.lower() == "value" and (
-                ".conditions[" in path or ".market_data_manipulations[" in path
+            is_input_value = key.lower() == "value" and any(
+                marker in path for marker in ("conditions[", "market_data_manipulations[")
             )
             if (key.lower() in GENERATED_KEYS and not is_input_value) or key.lower().endswith(("_value", "_amount")):
                 raise ValueError(f"generated value field {path}.{key} must be stored in Parquet, not JSON")
