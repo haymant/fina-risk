@@ -72,6 +72,22 @@ def _field(request: dict[str, Any], instrument_id: str, field: str) -> Any:
 def _calculation_values(request: dict[str, Any]) -> dict[str, float]:
     """Best-effort extraction from the reference pricer; missing lanes remain explicit nulls."""
     try:
+        if {"parameters", "market_data", "legs", "fcn_terms"}.issubset(request):
+            from .fcn_native import price_fcn_request
+
+            result = price_fcn_request(request)
+            if result.get("status") not in (None, "ok"):
+                raise RuntimeError(f"canonical FCN pricing returned status {result.get('status')!r}")
+            values: dict[str, float] = {}
+            for key in ("pv", "put_price", "funding", "coupon_pv"):
+                value = result.get(key)
+                if isinstance(value, (int, float)):
+                    values[key] = float(value)
+            for key, source in (("delta", "relative_delta"), ("gamma", "relative_gamma")):
+                value = result.get(source)
+                if isinstance(value, list) and value and isinstance(value[0], (int, float)):
+                    values[key] = float(value[0])
+            return values
         jobs = load_legacy_request(request)
         if not jobs:
             return {}
@@ -91,6 +107,8 @@ def _calculation_values(request: dict[str, Any]) -> dict[str, float]:
                 values[measure] = values.get(measure, 0.0) + float(value)
         return values
     except Exception:
+        if {"parameters", "market_data", "legs", "fcn_terms"}.issubset(request):
+            raise
         return {}
 
 
