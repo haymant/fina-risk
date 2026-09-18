@@ -134,6 +134,31 @@ def validate_fcn_request(request: dict[str, Any]) -> None:
         raise ValueError("memory_ko is ambiguous without memory_ko_mode=per_underlying_ever")
 
 
+def _native_price(native: Any, request: dict[str, Any], path_cube: np.ndarray, dates: np.ndarray) -> dict[str, Any]:
+    return json.loads(native.price_fcn_rakiplus(json.dumps(request), path_cube, dates))
+
+
+def _bumped_request(request: dict[str, Any], index: int, *, spot_factor: float | None = None, vol_shift: float = 0.0) -> dict[str, Any]:
+    bumped = json.loads(json.dumps(request))
+    if spot_factor is not None:
+        underlying = bumped["market_data"]["underlyings"][index]
+        underlying["quoted_spot"] = float(underlying["quoted_spot"]) * spot_factor
+        underlying["reference_spot"] = float(underlying["reference_spot"]) * spot_factor
+    if vol_shift:
+        target = str(bumped["market_data"]["underlyings"][index]["id"])
+        for surface in bumped["market_data"].get("vol_surfaces", []):
+            if str(surface.get("underlying")) != target:
+                continue
+            values = surface.get("volatility", surface.get("vol"))
+            if isinstance(values, list):
+                surface["volatility"] = [
+                    [float(value) + vol_shift for value in row] if isinstance(row, list) else float(row) + vol_shift
+                    for row in values
+                ]
+            break
+    return bumped
+
+
 def price_fcn_request(
     request: dict[str, Any], *, path_cube: np.ndarray | None = None, dates: np.ndarray | None = None
 ) -> dict[str, Any]:
@@ -146,11 +171,32 @@ def price_fcn_request(
     request = {**request, "source_revision": request.get("source_revision", _revision())}
     request.setdefault("request_id", _stable_id("request", request))
     native = _require_native()
-    result = json.loads(native.price_fcn_rakiplus(json.dumps(request), path_cube, np.asarray(dates, dtype=np.int32)))
+    dates = np.asarray(dates, dtype=np.int32)
+    result = _native_price(native, request, path_cube, dates)
     if result.get("engine_marker") != "cpp_fcn_rakiplus_v1":
         raise RuntimeError("native FCN engine marker missing; refusing non-native quote result")
     if result.get("status") != "ok":
         return result
+    bump = float(request["parameters"].get("bump_size", 0.01))
+    base_pv = float(result.get("pv", 0.0))
+    deltas: list[float] = []
+    gammas: list[float] = []
+    vegas: list[float] = []
+    for index, _underlying in enumerate(request["market_data"]["underlyings"]):
+        up = _native_price(native, _bumped_request(request, index, spot_factor=1.0 + bump), path_cube, dates)
+        down = _native_price(native, _bumped_request(request, index, spot_factor=1.0 - bump), path_cube, dates)
+        up_pv = float(up.get("pv", base_pv))
+        down_pv = float(down.get("pv", base_pv))
+        spot = float(request["market_data"]["underlyings"][index]["quoted_spot"])
+        dollar_bump = bump * spot
+        deltas.append((up_pv - down_pv) / (2.0 * dollar_bump))
+        gammas.append((up_pv - 2.0 * base_pv + down_pv) / (dollar_bump * dollar_bump))
+        vol_up = _native_price(native, _bumped_request(request, index, vol_shift=0.01), path_cube, dates)
+        vol_down = _native_price(native, _bumped_request(request, index, vol_shift=-0.01), path_cube, dates)
+        vegas.append((float(vol_up.get("pv", base_pv)) - float(vol_down.get("pv", base_pv))) / 0.02)
+    result["relative_delta"] = deltas
+    result["relative_gamma"] = gammas
+    result["relative_vega"] = vegas
     result["native"] = True
     result["path_cube"] = {
         "paths": int(path_cube.shape[0]),

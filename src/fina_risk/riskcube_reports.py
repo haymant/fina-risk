@@ -104,10 +104,18 @@ def _calculation_values(request: dict[str, Any]) -> dict[str, float]:
                 value = result.get(key)
                 if isinstance(value, (int, float)):
                     values[key] = float(value)
-            for key, source in (("delta", "relative_delta"), ("gamma", "relative_gamma")):
+            for key, source in (
+                ("delta", "relative_delta"),
+                ("gamma", "relative_gamma"),
+                ("vega", "relative_vega"),
+            ):
                 value = result.get(source)
                 if isinstance(value, list) and value and isinstance(value[0], (int, float)):
-                    values[key] = float(value[0])
+                    values[key] = float(sum(value))
+            for key in ("delta", "gamma", "vega"):
+                value = result.get(key)
+                if isinstance(value, (int, float)):
+                    values[key] = float(value)
             return values
         jobs = load_legacy_request(request)
         if not jobs:

@@ -99,6 +99,10 @@ def test_native_fcn_coupon_memory_boundaries_and_physical_delivery() -> None:
     assert _leg(result, "FUNDING")["pv"] > 0.0
     assert _leg(result, "COUPON")["pv"] > 0.0
     assert _leg(result, "PUT / Terminal Optionality")["pv"] < 0.0
+    assert len(result["delta"]) == 2
+    assert len(result["gamma"]) == 2
+    assert len(result["vega"]) == 2
+    assert any(value != 0.0 for value in result["delta"])
     assert any(item["physical_delivery"] for item in result["cashflows"] if item["leg"] == "PUT / Terminal Optionality")
     assert result["ki_probability"] == 0.25
 
