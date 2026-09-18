@@ -1,5 +1,8 @@
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
+
 from fina_risk.olap import link_view_state, query_ssrm, storage_status, write_risk_store
 
 
@@ -106,3 +109,23 @@ def test_hive_partition_glob_round_trip(monkeypatch, tmp_path: Path) -> None:
     response = query_ssrm({"startRow": 0, "endRow": 10})
     assert response["success"] is True
     assert len(response["rows"]) == 2
+
+
+def test_schema_varying_partitions_are_unioned_by_name(monkeypatch, tmp_path: Path) -> None:
+    from fina_risk.storage import reload_storage_config
+
+    monkeypatch.setenv("FINA_OLAP_STORE", "local")
+    monkeypatch.setenv("FINA_OLAP_PARQUET_ROOT", str(tmp_path))
+    monkeypatch.setenv("FINA_OLAP_PARTITION_GLOB", "{tableName}/*.parquet")
+    monkeypatch.setenv("FINA_OLAP_HIVE_PARTITIONING", "0")
+    reload_storage_config()
+
+    dataset = tmp_path / "risk_wide"
+    dataset.mkdir()
+    pq.write_table(pa.table({"instrument_id": ["I1"], "delta": [1.0]}), dataset / "part-a.parquet")
+    pq.write_table(pa.table({"instrument_id": ["I2"], "vega": [2.0]}), dataset / "part-b.parquet")
+
+    response = query_ssrm({"startRow": 0, "endRow": 10})
+    assert response["success"] is True
+    assert {row["instrument_id"] for row in response["rows"]} == {"I1", "I2"}
+    assert {"delta", "vega"}.issubset(response["rows"][0])

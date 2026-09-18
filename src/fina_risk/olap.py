@@ -176,7 +176,7 @@ def _read_relation(con: duckdb.DuckDBPyConnection, dataset: str, root: Path | st
     escaped_path = source.replace("'", "''")
     con.execute(
         f"CREATE OR REPLACE TEMP VIEW olap_source AS "
-        f"SELECT * FROM read_parquet('{escaped_path}', hive_partitioning = {str(bool(hive)).upper()})"
+        f"SELECT * FROM read_parquet('{escaped_path}', hive_partitioning = {str(bool(hive)).upper()}, union_by_name = true)"
     )
     return "olap_source"
 
