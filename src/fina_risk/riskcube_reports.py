@@ -48,6 +48,13 @@ def _instrument_id(request: dict[str, Any], index: int) -> str:
         value = key.get("instrument_id") or key.get("name") or key.get("isin")
         if value:
             return str(value)
+    canonical_key = request.get("instrument_key")
+    if isinstance(canonical_key, str) and canonical_key.strip():
+        return canonical_key.strip()
+    if isinstance(canonical_key, dict):
+        value = canonical_key.get("instrument_id") or canonical_key.get("name") or canonical_key.get("isin")
+        if value:
+            return str(value)
     for key_name in ("instrument_id", "instrumentId", "instrument_key"):
         value = request.get(key_name)
         if value:
@@ -62,10 +69,24 @@ def _field(request: dict[str, Any], instrument_id: str, field: str) -> Any:
         key = request.get("InstrumentKey")
         if isinstance(key, dict):
             return key.get("product_type") or request.get("product_type")
-        return request.get("product_type")
+        canonical_key = request.get("instrument_key")
+        if isinstance(canonical_key, dict) and canonical_key.get("product_type"):
+            return canonical_key["product_type"]
+        return request.get("product_type") or "FCN"
     key = request.get("InstrumentKey")
     if isinstance(key, dict) and field in key:
         return key[field]
+    canonical_key = request.get("instrument_key")
+    if isinstance(canonical_key, dict) and field in canonical_key:
+        return canonical_key[field]
+    terms = request.get("fcn_terms")
+    if isinstance(terms, dict):
+        if field == "currency":
+            return terms.get("currency")
+        if field == "notional":
+            return terms.get("notional")
+    if field == "name" and isinstance(canonical_key, str):
+        return canonical_key
     return request.get(field)
 
 

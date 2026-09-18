@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from fina_risk import riskcube
+from fina_risk.riskcube_reports import _field, _instrument_id
 
 
 def test_slice_and_report_lifecycle_uses_incremental_version_ids(tmp_path, monkeypatch):
@@ -76,3 +77,17 @@ def test_query_requires_ready_report(tmp_path, monkeypatch):
     report = riskcube.create_report({"slice_key": "s", "configuration_group": "sensitivity", "report_kinds": ["risk"]})
     with pytest.raises(ValueError, match="not ready"):
         riskcube.query_report(report["report_key"], {"startRow": 0, "endRow": 10})
+
+
+def test_canonical_slice_payload_preserves_report_dimensions():
+    request = {
+        "instrument_key": "FCN-AAPL-001",
+        "fcn_terms": {"currency": "USD", "notional": 100000.0},
+        "parameters": {},
+    }
+
+    assert _instrument_id(request, 0) == "FCN-AAPL-001"
+    assert _field(request, "FCN-AAPL-001", "name") == "FCN-AAPL-001"
+    assert _field(request, "FCN-AAPL-001", "product_type") == "FCN"
+    assert _field(request, "FCN-AAPL-001", "currency") == "USD"
+    assert _field(request, "FCN-AAPL-001", "notional") == 100000.0
