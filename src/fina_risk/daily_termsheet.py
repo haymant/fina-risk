@@ -1,13 +1,22 @@
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from .pricing import excel_date, year_fraction
+from .pricing import (
+    common_from_job,
+    conservative_surface_vols,
+    excel_date,
+    load_legacy_request,
+    market_from_legacy,
+    year_fraction,
+)
 
 
 @dataclass(frozen=True)
@@ -104,6 +113,126 @@ def nyse_serials(start: int, end: int) -> np.ndarray:
             values.append((current - excel_date(0)).days)
         current += timedelta(days=1)
     return np.asarray(values, dtype=np.int64)
+
+
+def load_termsheet(termsheet: Any) -> dict[str, Any]:
+    """Accept a legacy term-sheet as dict, JSON string, or file path."""
+    if isinstance(termsheet, dict):
+        return termsheet
+    if isinstance(termsheet, Path) or (isinstance(termsheet, str) and Path(termsheet).exists()):
+        return json.loads(Path(termsheet).read_text(encoding="utf-8"))
+    if isinstance(termsheet, str):
+        return json.loads(termsheet)
+    raise TypeError(f"cannot interpret termsheet: {type(termsheet).__name__}")
+
+
+def build_daily_path_cube(
+    termsheet: Any,
+    *,
+    paths: int = 30000,
+    seed: int = 1729,
+    locvol: bool = False,
+    vol_shift: dict[int, float] | None = None,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """GBM daily path cube (NYSE calendar) from a legacy term-sheet.
+
+    The matrix is ``(paths, observations, underlyings)`` and is built with a
+    deterministic generator so the same ``seed``/``paths`` always produces the
+    same cube. ``vol_shift`` adds an absolute vol shift per underlying index
+    (used for CRN vega bumps): shocks, drift, and construction order are
+    identical to the base cube, so native prices stay path-for-path comparable.
+    """
+    root = load_termsheet(termsheet)
+    if locvol and vol_shift:
+        raise ValueError("vol_shift is only defined for the scalar-surface lane")
+    common = common_from_job(load_legacy_request(root)[0])
+    market = market_from_legacy(common, paths=paths, seed=seed, locvol=locvol)
+    deal = common["dealData"]
+    market_data = common["marketData"]
+    refs = [float(x["spot"]) for x in deal["instrument"]["underlyings"][:2]]
+    strike_ratio = float(deal.get("knockInStar", {}).get("strikeKI2", deal.get("strike", 0.78)))
+    ki_ratio = float(deal.get("knockInStar", {}).get("KIBarrier", 0.70))
+    expiry = max(
+        int(j["commonData"]["dealData"].get("expiryDate", j["commonData"]["dealData"].get("maturityDate")))
+        for j in root["Chunk"]["Jobs"]
+    )
+    vols_map = conservative_surface_vols(market_data, market.names, refs, strike_ratio, ki_ratio, expiry)
+    vol_vec = np.asarray([vols_map[name] for name in market.names], dtype=float)
+    if vol_shift:
+        for index, delta in vol_shift.items():
+            vol_vec[index] += float(delta)
+    dates = nyse_serials(market.evaluation_date, expiry)
+    steps = len(dates)
+    rng = np.random.default_rng(seed)
+    z1 = rng.standard_normal((paths, steps))
+    corr_scale = np.sqrt(max(1.0 - market.correlation**2, 0.0))
+    z2 = market.correlation * z1 + corr_scale * rng.standard_normal((paths, steps))
+    dt = 1.0 / 252.0
+    shocks = np.stack((z1, z2), axis=2)
+    log_spots = np.log(market.quoted_spots)[None, None, :] + np.cumsum(
+        (market.rate - 0.5 * vol_vec**2)[None, None, :] * dt + vol_vec[None, None, :] * np.sqrt(dt) * shocks,
+        axis=1,
+    )
+    if locvol:
+        lv0 = market.locvol.get(market.names[0])
+        lv1 = market.locvol.get(market.names[1])
+        spots = np.empty((paths, steps, 2), dtype=np.float64)
+        log_s = np.broadcast_to(np.log(market.quoted_spots)[None, :], (paths, 2)).copy()
+        for sstep in range(steps):
+            sig0 = lv0.sigma(sstep * dt, np.exp(log_s[:, 0])) if lv0 is not None else np.full(paths, market.vols[0], dtype=float)
+            sig1 = lv1.sigma(sstep * dt, np.exp(log_s[:, 1])) if lv1 is not None else np.full(paths, market.vols[1], dtype=float)
+            sig_stack = np.stack((sig0, sig1), axis=1)
+            log_s += (market.rate - 0.5 * sig_stack**2) * dt + sig_stack * np.sqrt(dt) * shocks[:, sstep, :]
+            spots[:, sstep, :] = np.exp(log_s)
+    else:
+        spots = np.exp(log_spots).astype(np.float64)
+    meta = {
+        "paths": paths,
+        "observations": steps,
+        "underlyings": len(market.names),
+        "seed": seed,
+        "dates": dates.tolist(),
+        "vols": {name: float(vols_map[name]) for name in market.names},
+        "calendar": "NYSE",
+    }
+    return np.ascontiguousarray(spots, dtype=np.float64), meta
+
+
+def capture_native_quote(
+    termsheet: Any,
+    *,
+    paths: int = 30000,
+    seed: int = 1729,
+    bump: float = 0.01,
+    vol_shift: float = 0.01,
+) -> dict[str, Any]:
+    """Faithful native daily-ki result on the legacy termsheet, including vega.
+
+    ``run_daily_termsheet`` prices the pre-built cube and finite-differences the
+    cube itself for delta/gamma, so the vol bump (vega) is not visible to the
+    native lane. It is computed the same way the canonical RakiPlus lane does:
+    re-running the native engine on CRN cubes whose single underlying's vol is
+    shifted by ``+/-vol_shift``, with ``(pv_up - pv_down) / (2 * vol_shift)``.
+    """
+    import importlib
+
+    native = importlib.import_module("fina_risk_cpp")
+    root = load_termsheet(termsheet)
+    base, meta = build_daily_path_cube(termsheet, paths=paths, seed=seed)
+    dates = np.asarray(meta["dates"], dtype=np.int32)
+
+    def price(cube: np.ndarray) -> dict[str, Any]:
+        return json.loads(native.run_daily_termsheet(json.dumps(root), np.asarray(cube, dtype=np.float64), dates, bump))
+
+    result = price(base)
+    vegas: list[float] = []
+    for index in range(int(meta["underlyings"])):
+        up, _ = build_daily_path_cube(termsheet, paths=paths, seed=seed, vol_shift={index: +vol_shift})
+        down, _ = build_daily_path_cube(termsheet, paths=paths, seed=seed, vol_shift={index: -vol_shift})
+        vegas.append((float(price(up).get("pv", 0.0)) - float(price(down).get("pv", 0.0))) / (2.0 * vol_shift))
+    result["relative_vega"] = vegas
+    result["aad_engine"] = result.get("aad_engine", "disabled")
+    return result
 
 
 def price_daily_termsheet(

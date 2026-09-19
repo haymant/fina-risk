@@ -2,14 +2,16 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "payoff-graph.schema.json",
   "title": "PayoffGraph",
+  "description": "WARM self-consistency view of a compiled payoff graph. The canonical schema and document live in fina-skills (schema/payoff-graph.schema.json, fina/payoff-graph/v1) and are emitted by fina-core's compile_payoff_graph; this view is intentionally permissive so canonical and exploratory graphs both validate.",
   "type": "object",
   "required": ["graph_id", "graph_type"],
   "properties": {
+    "schema_version": {"type": "string"},
     "graph_id": {"type": "string"},
     "graph_type": {"enum": ["PAYOFF", "STATE", "AAD", "VALUATION"]},
+    "graph_hash": {"type": ["string", "null"]},
     "root_node": {"type": "string"},
-    "node_count": {"type": "integer"},
-    "graph_hash": {"type": "string"}
+    "node_count": {"type": "integer"}
   },
-  "additionalProperties": false
+  "additionalProperties": true
 }

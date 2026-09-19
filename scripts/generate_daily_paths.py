@@ -4,94 +4,27 @@ import argparse
 import json
 from pathlib import Path
 
-import numpy as np
-
-from fina_risk.daily_termsheet import nyse_serials
-from fina_risk.pricing import (
-    common_from_job,
-    conservative_surface_vols,
-    load_legacy_request,
-    market_from_legacy,
-)
+from fina_risk.daily_termsheet import build_daily_path_cube
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("fixture")
-    ap.add_argument("output")
+    ap.add_argument("output", help="raw float64 (paths, observations, underlyings) cube file; meta is written to <output>.meta.json")
     ap.add_argument("--paths", type=int, default=30000)
     ap.add_argument("--seed", type=int, default=1729)
     ap.add_argument("--locvol", action="store_true", help="per-step Dupire local vol instead of flat scalar surface")
     args = ap.parse_args()
-    root = json.loads(Path(args.fixture).read_text())
-    common = common_from_job(load_legacy_request(root)[0])
-    market = market_from_legacy(common, paths=args.paths, seed=args.seed, locvol=args.locvol)
-    deal = common["dealData"]
-    market_data = common["marketData"]
-    refs = [float(x["spot"]) for x in deal["instrument"]["underlyings"][:2]]
-    strike_ratio = float(deal.get("knockInStar", {}).get("strikeKI2", deal.get("strike", 0.78)))
-    ki_ratio = float(deal.get("knockInStar", {}).get("KIBarrier", 0.70))
-    expiry = max(
-        int(j["commonData"]["dealData"].get("expiryDate", j["commonData"]["dealData"].get("maturityDate")))
-        for j in root["Chunk"]["Jobs"]
-    )
-    # Conservative full-surface vol read (exercise + knock-in moneyness, higher
-    # wing kept) replacing the flat ATM point; real NYSE fixing calendar.
-    vols_map = conservative_surface_vols(market_data, market.names, refs, strike_ratio, ki_ratio, expiry)
-    vol_vec = np.asarray([vols_map[name] for name in market.names], dtype=float)
-    dates = nyse_serials(market.evaluation_date, expiry)
-    steps = len(dates)
-    rng = np.random.default_rng(args.seed)
-    z1 = rng.standard_normal((args.paths, steps))
-    corr_scale = np.sqrt(max(1.0 - market.correlation**2, 0.0))
-    z2 = market.correlation * z1 + corr_scale * rng.standard_normal((args.paths, steps))
-    dt = 1.0 / 252.0
-    shocks = np.stack((z1, z2), axis=2)
-    drift = (market.rate - 0.5 * vol_vec**2)[None, None, :] * dt
-    diffusion = vol_vec[None, None, :] * np.sqrt(dt) * shocks
-    increments = drift + diffusion
-    log_spots = np.log(market.quoted_spots)[None, None, :] + np.cumsum(increments, axis=1)
-    if args.locvol:
-        # Per-step Dupire local vol: sigma(t, S_t) sampled from the Dupire surface
-        # per observation, on the same CRN shocks as the scalar lane.
-        lv0 = market.locvol.get(market.names[0])
-        lv1 = market.locvol.get(market.names[1])
-        spots_lv = np.empty((args.paths, steps, 2), dtype=np.float64)
-        log_s = np.broadcast_to(np.log(market.quoted_spots)[None, :], (args.paths, 2)).copy()
-        for sstep in range(steps):
-            t_s = sstep * dt
-            if lv0 is None:
-                sig0 = np.full(args.paths, market.vols[0], dtype=float)
-            else:
-                sig0 = lv0.sigma(t_s, np.exp(log_s[:, 0]))
-            if lv1 is None:
-                sig1 = np.full(args.paths, market.vols[1], dtype=float)
-            else:
-                sig1 = lv1.sigma(t_s, np.exp(log_s[:, 1]))
-            sig_stack = np.stack((sig0, sig1), axis=1)
-            log_s += (market.rate - 0.5 * sig_stack**2) * dt + sig_stack * np.sqrt(dt) * shocks[:, sstep, :]
-            spots_lv[:, sstep, :] = np.exp(log_s)
-        spots = spots_lv
-    else:
-        spots = np.exp(log_spots).astype(np.float64)
+    spots, meta = build_daily_path_cube(args.fixture, paths=args.paths, seed=args.seed, locvol=args.locvol)
     spots.tofile(args.output)
-    meta = {
-        "paths": args.paths,
-        "observations": steps,
-        "underlyings": 2,
-        "seed": args.seed,
-        "dates": dates.tolist(),
-        "vols": {name: float(vols_map[name]) for name in market.names},
-        "calendar": "NYSE",
-    }
     Path(args.output + ".meta.json").write_text(json.dumps(meta, indent=2) + "\n")
     summary = {
         "output": args.output,
-        "paths": args.paths,
-        "observations": steps,
+        "paths": meta["paths"],
+        "observations": meta["observations"],
         "vols": meta["vols"],
-        "calendar": "NYSE",
-        "dates": dates.tolist(),
+        "calendar": meta["calendar"],
+        "dates": meta["dates"],
     }
     print(json.dumps(summary, indent=2))
 
