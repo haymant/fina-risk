@@ -237,6 +237,23 @@ def _market_snapshot(market: dict[str, Any], reference: list[float]) -> dict[str
     }
 
 
+def _instrument_key(deal: dict[str, Any]) -> str:
+    """Human-readable instrument key from a legacy deal block.
+
+    ``dealData._id`` is often a synthetic ``{"timestamp": …, "date": …}`` object;
+    stringifying it yields a Python repr, so prefer the named fields and only fall
+    back to a *string* ``_id``.
+    """
+    for key in ("instrumentName", "name", "productName"):
+        value = deal.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    identifier = deal.get("_id")
+    if isinstance(identifier, str) and identifier.strip():
+        return identifier.strip()
+    return "instrument"
+
+
 def compile_pricing_request(source: str | Path | dict[str, Any]) -> dict[str, Any]:
     """Compile a legacy term sheet into the fina-risk ``pricing-request`` schema."""
     termsheet = load_termsheet(source)
@@ -291,7 +308,7 @@ def compile_pricing_request(source: str | Path | dict[str, Any]) -> dict[str, An
     ]
 
     return {
-        "instrument_key": str(put.get("_id") or put.get("instrumentName") or "instrument"),
+        "instrument_key": _instrument_key(put),
         "market_data": _market_snapshot(market, reference),
         "parameters": {
             "bump_size": 0.01,

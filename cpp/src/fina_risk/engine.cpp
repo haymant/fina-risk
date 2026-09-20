@@ -97,7 +97,14 @@ CompiledTerms compile_canonical_terms(const std::string& request_json) {
     if (market.contains("curves") && market.at("curves").is_array() && !market.at("curves").empty()) {
         const auto& curve = market.at("curves").at(0);
         if (curve.contains("pillars") && curve.at("pillars").is_array() && !curve.at("pillars").empty()) {
-            terms.rate = numeric(curve.at("pillars").at(0), "rate");
+            for (const auto& pillar : curve.at("pillars")) {
+                const int pillar_date = integer(pillar, "date", 0);
+                if (pillar_date > 0) {
+                    terms.curve_pillars.emplace_back(pillar_date, numeric(pillar, "rate"));
+                }
+            }
+            std::sort(terms.curve_pillars.begin(), terms.curve_pillars.end());
+            terms.rate = terms.curve_pillars.empty() ? 0.0 : terms.curve_pillars.front().second;
         }
     }
 
@@ -288,7 +295,7 @@ EngineResult price(const FcnTerms& terms, const ObservationCubeView& cube) {
             }
             const int settlement_date = is_ko_period ? cube.dates[static_cast<std::size_t>(state.ko_observation)] : period.payment_date;
             const double cash = terms.notional * rate;
-            const double discounted = cash * std::exp(-terms.rate * std::max(settlement_date - terms.evaluation_date, 0) / 365.0);
+            const double discounted = cash * std::exp(-curve_rate_at(terms.curve_pillars, terms.rate, settlement_date) * std::max(settlement_date - terms.evaluation_date, 0) / 365.0);
             coupon_cash_sum[period_index] += cash;
             coupon_pv_sum[period_index] += discounted;
             state.unpaid_coupon = terms.coupon_memory ? (coupon_barrier_ok ? next_memory(period, qualifying) : std::max(static_cast<double>(period.total_fixings), 1.0)) : 0.0;
@@ -299,12 +306,12 @@ EngineResult price(const FcnTerms& terms, const ObservationCubeView& cube) {
         const std::size_t funding_observation = state.terminated ? static_cast<std::size_t>(state.ko_observation) : final_index;
         const double funding_cash = funding_amount(terms.funding, terms.notional);
         funding_cash_by_observation[funding_observation] += funding_cash;
-        funding_pv_by_observation[funding_observation] += funding_cash * std::exp(-terms.rate * std::max(settlement_date - terms.evaluation_date, 0) / 365.0);
+        funding_pv_by_observation[funding_observation] += funding_cash * std::exp(-curve_rate_at(terms.curve_pillars, terms.rate, settlement_date) * std::max(settlement_date - terms.evaluation_date, 0) / 365.0);
         if (!state.terminated) {
             const double payoff = terminal_option_payoff(terms.terminal, state.knock_in_seen, terminal_performance);
             const double cash = terms.notional * payoff;
             put_cash_sum += cash;
-            put_pv_sum += cash * std::exp(-terms.rate * std::max(terms.maturity_date - terms.evaluation_date, 0) / 365.0);
+            put_pv_sum += cash * std::exp(-curve_rate_at(terms.curve_pillars, terms.rate, terms.maturity_date) * std::max(terms.maturity_date - terms.evaluation_date, 0) / 365.0);
         }
     }
 

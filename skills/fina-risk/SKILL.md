@@ -215,6 +215,12 @@ Three jobs share one market snapshot and differ only in `dealData`:
 
 **marketData**: equity quotes for `ADBE UW` (spot 267.885) and `AMZN UW` (spot 258.355) with bid/ask, cash dividends (Excel serial `exDate`), pair correlation `0.4593248180…`, `eqVol` strike×maturity volatility grids per underlying (`strike_type=fixed`, `Reference` spot), `estCurves`/`discCurves` `USD Std Curve` (Actual/365), `MCPara.numPaths=30000`, and `evaluationDate` 46272 (serial). Serial dates are Excel-style: 46136=2026-04-24 (trade/initial fixing), 46419=2027-02-01 (final fixing), 46421=2027-02-03 (expected expiry), 46174=2026-06-01 (ADBE memory call date).
 
+To **assemble** this `marketData` block from live sources — correlation, the
+calibrated implied-vol surface, the rate curve, FX/FX-vol and dividends — use the
+tac-engine MCP tools documented in
+`tac-engine/skills/tac-market-data/SKILL.md` (`corr_matrix`, `vol_surface`,
+`rate_curve`, `fx_vol_surface`) rather than a single ATM vol point.
+
 **instrument economics (ELIFCN_KI)**:
 
 - Underlyings: `spot` 239.97 / 260.00, `strikePrice` 187.1766 / 202.80 (**78%** exercise), `barrierPrice` 263.967 / 286.00 (**110%** call/memory).

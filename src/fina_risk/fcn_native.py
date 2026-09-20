@@ -60,8 +60,44 @@ def _surface_point(surface: dict[str, Any], strike: float, maturity: int, evalua
         return float(row_values[0])
     times = np.maximum((maturities - evaluation) / 365.0, 1.0e-6)
     target = max((maturity - evaluation) / 365.0, 1.0e-6)
+    # Flat extrapolation in vol beyond the bracketing pillars: dividing a flat
+    # total variance by a near-zero target would blow up the front-dated vol.
+    if target <= times[0]:
+        return float(row_values[0])
+    if target >= times[-1]:
+        return float(row_values[-1])
     variance = np.interp(target, times, row_values**2 * times)
     return float(np.sqrt(max(variance, 1.0e-12) / target))
+
+
+def _curve_rate_at(pillars: list[dict[str, Any]], target_date: int) -> float:
+    """Linear-in-rate zero-curve interpolation (ACT/365) to an Excel serial date.
+
+    Pillars are ``{"date": serial, "rate": r}``; the read is flat beyond the first
+    and last pillar. An empty curve returns 0.0. Mirrors the native C++
+    ``curve_rate_at`` so both engines discount the same way.
+    """
+    points: list[tuple[int, float]] = []
+    for pillar in pillars or []:
+        date = pillar.get("date")
+        rate = pillar.get("rate")
+        if date is None or rate is None:
+            continue
+        points.append((int(date), float(rate)))
+    if not points:
+        return 0.0
+    points.sort()
+    if target_date <= points[0][0]:
+        return points[0][1]
+    if target_date >= points[-1][0]:
+        return points[-1][1]
+    for i in range(1, len(points)):
+        if target_date <= points[i][0]:
+            d0, r0 = points[i - 1]
+            d1, r1 = points[i]
+            w = 0.0 if d1 == d0 else (target_date - d0) / (d1 - d0)
+            return r0 + w * (r1 - r0)
+    return points[-1][1]
 
 
 def _correlation(market: dict[str, Any], count: int) -> np.ndarray:
@@ -93,18 +129,7 @@ def build_daily_path_cube(request: dict[str, Any]) -> tuple[np.ndarray, np.ndarr
     payoff = put.get("payoff", {})
     strike_ratio = float(payoff.get("strike", 0.78))
     ki_ratio = float(payoff.get("knock_in", {}).get("barrier", 0.70))
-    vols = np.asarray(
-        [
-            max(
-                _surface_point(surfaces.get(str(item["id"]), {}), strike_ratio * float(item["reference_spot"]), maturity, evaluation),
-                _surface_point(surfaces.get(str(item["id"]), {}), ki_ratio * float(item["reference_spot"]), maturity, evaluation),
-            )
-            for item in underlyings
-        ],
-        dtype=float,
-    )
-    rates = market.get("curves", [{}])[0].get("pillars", [])
-    rate = float(rates[0].get("rate", 0.0)) if rates else 0.0
+    pillars = market.get("curves", [{}])[0].get("pillars", [])
     parameters = request["parameters"]
     paths = int(parameters.get("paths", 30000))
     if paths < 1:
@@ -113,7 +138,22 @@ def build_daily_path_cube(request: dict[str, Any]) -> tuple[np.ndarray, np.ndarr
     independent = generator.standard_normal((paths, dates.size, spots.size))
     shocks = independent @ np.linalg.cholesky(_correlation(market, spots.size)).T
     dt = 1.0 / 252.0
-    increments = (rate - 0.5 * vols**2)[None, None, :] * dt + vols[None, None, :] * np.sqrt(dt) * shocks
+    # Term structure of rates: per-observation zero from the curve (flat when the
+    # payload carries a single pillar), matching the C++ discount curve.
+    step_rates = np.asarray([_curve_rate_at(pillars, int(date)) for date in dates], dtype=float)
+    # Per-observation vol: the worst of the exercise (0.78x) and knock-in (0.70x)
+    # moneyness read at each fixing date, so the smile term structure flows into
+    # the paths. A single-maturity grid collapses to today's flat sigma.
+    step_vols = np.empty((dates.size, spots.size), dtype=float)
+    for index, item in enumerate(underlyings):
+        surface = surfaces.get(str(item["id"]), {})
+        reference = float(item["reference_spot"])
+        for step, date in enumerate(dates):
+            step_vols[step, index] = max(
+                _surface_point(surface, strike_ratio * reference, int(date), evaluation),
+                _surface_point(surface, ki_ratio * reference, int(date), evaluation),
+            )
+    increments = (step_rates[:, None] - 0.5 * step_vols**2) * dt + step_vols * np.sqrt(dt) * shocks
     cube = np.exp(np.log(spots)[None, None, :] + np.cumsum(increments, axis=1))
     return np.ascontiguousarray(cube, dtype=np.float64), np.asarray(dates, dtype=np.int32)
 
