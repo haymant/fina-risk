@@ -99,7 +99,15 @@ CompiledTerms compile_canonical_terms(const std::string& request_json) {
         if (curve.contains("pillars") && curve.at("pillars").is_array() && !curve.at("pillars").empty()) {
             for (const auto& pillar : curve.at("pillars")) {
                 const int pillar_date = integer(pillar, "date", 0);
-                if (pillar_date > 0) {
+                // A pillar needs BOTH a date and a rate. `numeric(pillar, "rate")`
+                // defaults to 0.0, so a pillar that carried a date but no rate used
+                // to be accepted as a genuine 0% rate and the whole curve was then
+                // discounted at zero. A rate we were never given is not a rate of
+                // zero. Skipping the pillar leaves the curve unusable, and the
+                // check below refuses rather than guessing. The Python mirror
+                // `_curve_rate_at` already skipped on `rate is None`; these two
+                // lanes are now the same rule.
+                if (pillar_date > 0 && pillar.contains("rate") && pillar.at("rate").is_number()) {
                     terms.curve_pillars.emplace_back(pillar_date, numeric(pillar, "rate"));
                 }
             }
@@ -121,6 +129,17 @@ CompiledTerms compile_canonical_terms(const std::string& request_json) {
     terms.range_upper_inclusive = fcn.value("range_upper_inclusive", true);
     terms.use_worst_of = text(fcn, "performance_indicator", "worst_of") == "worst_of";
     if (!terms.use_worst_of) return {{}, EvidenceStatus::unsupported, "only performance_indicator=worst_of is implemented"};
+    // Refuse to price without a discount curve. With no pillars, `curve_rate_at`
+    // falls back to `terms.rate`, which is left at 0.0 above -- so every coupon,
+    // funding and put cashflow was discounted at zero and the note came out at
+    // its undiscounted value. That is a plausible-looking PV for a note nobody
+    // could actually sell, and it is the same class of gap as a missing fixing:
+    // we do not have the data, so we must not produce a number. `unresolved`
+    // rather than `unsupported` because the request is well formed, it just
+    // arrived without market data.
+    if (terms.curve_pillars.empty()) {
+        return {{}, EvidenceStatus::unresolved, "no discount curve: market.curves[].pillars is absent or empty, so cashflows cannot be discounted"};
+    }
     if (fcn.value("continuous_monitoring", false)) return {{}, EvidenceStatus::unsupported, "continuous monitoring is not represented by a discrete path cube"};
     if (fcn.value("memory_ko", false) && text(fcn, "memory_ko_mode") != "per_underlying_ever") {
         return {{}, EvidenceStatus::ambiguous, "memory_ko requires explicit memory_ko_mode=per_underlying_ever"};
@@ -316,13 +335,29 @@ EngineResult price(const FcnTerms& terms, const ObservationCubeView& cube) {
     }
 
     const double inv_paths = 1.0 / static_cast<double>(cube.paths);
+    // Two different quantities, deliberately kept apart from here on:
+    //
+    //   *_pv  -- the LEG. Quoted per unit of notional, and for the coupon leg
+    //            also carrying terms.coupon_quote_scale, the ten-point price
+    //            quotation convention. result.pv is the sum of these.
+    //   *     -- the CASHFLOW. The actual currency the note pays, undiscounted
+    //            and then discounted. No scale, no per-unit division.
+    //
+    // These used to share one expression, which put a per-unit, rescaled number
+    // into a cashflow's `discounted_amount` field sitting next to an absolute
+    // `amount`. So `discounted_amount` was not the PV of `amount`, and for the
+    // coupon it additionally differed from `amount` by the quote scale. A reader
+    // reconciling a cashflow could not, and the two conventions leaked into each
+    // other silently.
+    const double per_unit = 1.0 / std::max(terms.notional, 1.0);
     double coupon_pv = 0.0;
     for (std::size_t i = 0; i < terms.coupon_periods.size(); ++i) {
         const double expected_cash = coupon_cash_sum[i] * inv_paths;
-        const double expected_pv = coupon_pv_sum[i] * inv_paths * terms.coupon_quote_scale / std::max(terms.notional, 1.0);
-        coupon_pv += expected_pv;
+        const double expected_discounted = coupon_pv_sum[i] * inv_paths;
+        const double expected_leg_pv = expected_discounted * terms.coupon_quote_scale * per_unit;
+        coupon_pv += expected_leg_pv;
         if (expected_cash != 0.0) {
-            result.cashflows.push_back({"COUPON", std::to_string(terms.coupon_periods[i].payment_date), expected_cash, expected_pv,
+            result.cashflows.push_back({"COUPON", std::to_string(terms.coupon_periods[i].payment_date), expected_cash, expected_discounted,
                                         terms.currency, false, "/fcn_terms/coupon_periods/" + std::to_string(i)});
         }
     }
@@ -330,21 +365,23 @@ EngineResult price(const FcnTerms& terms, const ObservationCubeView& cube) {
     for (std::size_t obs = 0; obs < cube.observations; ++obs) {
         if (funding_cash_by_observation[obs] == 0.0) continue;
         const double expected_cash = funding_cash_by_observation[obs] * inv_paths;
-        const double expected_pv = funding_pv_by_observation[obs] * inv_paths / std::max(terms.notional, 1.0);
-        funding_pv += expected_pv;
-        result.cashflows.push_back({"FUNDING", std::to_string(cube.dates[obs]), expected_cash, expected_pv,
+        const double expected_discounted = funding_pv_by_observation[obs] * inv_paths;
+        const double expected_leg_pv = expected_discounted * per_unit;
+        funding_pv += expected_leg_pv;
+        result.cashflows.push_back({"FUNDING", std::to_string(cube.dates[obs]), expected_cash, expected_discounted,
                                     terms.currency, false, "/fcn_terms/funding"});
     }
-    const double put_pv = put_pv_sum * inv_paths / std::max(terms.notional, 1.0);
+    const double put_discounted = put_pv_sum * inv_paths;
+    const double put_pv = put_discounted * per_unit;
     if (put_cash_sum != 0.0) {
         const auto descriptor = settlement_for(terms, put_cash_sum);
         result.cashflows.push_back({"PUT / Terminal Optionality", std::to_string(terms.maturity_date), -put_cash_sum * inv_paths,
-                                    -put_pv, terms.currency, descriptor.physical_delivery, "/fcn_terms/terminal"});
+                                    -put_discounted, terms.currency, descriptor.physical_delivery, "/fcn_terms/terminal"});
     }
     result.legs = {
-        {"funding", "FUNDING", "funding", funding_pv, terms.currency, "funding.principal_return"},
-        {"coupon", "COUPON", "coupon", coupon_pv, terms.currency, "coupon.range_accrual"},
-        {"put", "PUT / Terminal Optionality", "terminal_optionality", -put_pv, terms.currency, "terminal.ki_put"},
+        {"funding", "FUNDING", "funding", funding_pv, terms.currency, "currency_per_unit_notional", "funding.principal_return"},
+        {"coupon", "COUPON", "coupon", coupon_pv, terms.currency, "currency_per_unit_notional_quote_scaled", "coupon.range_accrual"},
+        {"put", "PUT / Terminal Optionality", "terminal_optionality", -put_pv, terms.currency, "currency_per_unit_notional", "terminal.ki_put"},
     };
     result.pv = funding_pv + coupon_pv - put_pv;
     result.ki_probability = static_cast<double>(ki_paths) * inv_paths;

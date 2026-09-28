@@ -13,6 +13,13 @@ struct LegResult {
     std::string role;
     double pv{};
     std::string currency;
+    // The unit `pv` is denominated in, stated rather than assumed. Legs are
+    // quoted per unit of notional, and the coupon leg additionally carries
+    // `coupon_quote_scale` (the ten-point price quotation convention). Cashflows
+    // in the same result are absolute currency amounts. Both used to be reported
+    // with no unit at all, which is how a per-unit number ended up in a field
+    // called `discounted_amount` next to an absolute one.
+    std::string unit{"currency_per_unit_notional"};
     std::string payoff_graph_node;
     std::string origin{"pricing_engine"};
     std::string evidence_status{"implemented_and_evidenced"};

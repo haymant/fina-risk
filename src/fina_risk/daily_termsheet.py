@@ -86,6 +86,13 @@ def us_market_holidays(year: int) -> set[date]:
     """NYSE full-day closures. Mirrors ``is_us_market_holiday`` in the C++ lane."""
     holidays = {
         _observed(date(year, 1, 1)),
+        # When 1 January falls on a Saturday the exchange observes New Year's
+        # Day on the PRECEDING Friday, i.e. 31 December of THIS year, so it can
+        # never be found by looking up year `year`. Same defect the C++ copy had.
+        # When 1 January falls on a Sunday this also yields 2 January of the
+        # following year, which the exchange is likewise closed on -- so the
+        # extra date is correct either way and harmless to carry here.
+        _observed(date(year + 1, 1, 1)),
         _nth_weekday(year, 1, 3, 0),   # MLK Day
         _nth_weekday(year, 2, 3, 0),   # Washington's Birthday
         _easter_sunday(year) - timedelta(days=2),  # Good Friday

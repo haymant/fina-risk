@@ -1,5 +1,6 @@
 #include "fina_risk_cpp.hpp"
 #include "fina_risk/engine.hpp"
+#include "fina_risk/nyse_calendar.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -70,8 +71,11 @@ using json = nlohmann::json;
 //   - KIKOSelect.localKO=false / globalKO=true, with the memory-lock carry
 //     GKOLocked[] + GKODate[]. "global KO" means the daily auto-call condition
 //     fires when *all* basket assets are locked; "local KO" would be per-asset.
-//     The model consumes the *current lock state* (via the N1/N2 coupon carry)
-//     rather than simulating the daily lock path day by day.
+//     `price_fixture` seeds its per-asset latch from GKOLocked and then
+//     simulates the daily lock path on top of it, because that is what the term
+//     sheet asks for. The other lanes in this file do not: `run_cpp_parity` and
+//     `price_daily_compact` still run a joint test across the basket on a single
+//     fixing. Recorded in refs/block-book/registry/blocks.yaml.
 //   - knockInStar.KIBarrier=0.70 (knock-in price, 70% of initial) and
 //     strikeKI2=0.78 == maturBarrier (exercise price, 78% of initial).
 //   - RGACCLKO (the accrual/cash-dividend ledger): per-period accruRate,
@@ -99,9 +103,11 @@ using json = nlohmann::json;
 //     and discounted from paymentDate — the "accrued unpaid coupon" behaviour
 //     of a memory callable.
 //   - global/local KO .......... the daily auto-call requires *all* underlyings
-//     at/above the 110% call barrier on the same fixing. Pre-locked memory state
-//     (GKOLocked) is intentionally NOT credited: under-detecting calls only
-//     raises the short-put reserve, which is the conservative sell-side choice.
+//     to have BECOME locked -- a per-asset latch, seeded from GKOLocked and
+//     sticky across fixings, AND-ed across the basket. This replaced a joint
+//     test on a single fixing. The claim that the old reading was "conservative
+//     sell-side" was wrong in both halves: refusing a latch keeps the note alive,
+//     and a live note is a bigger liability, not a smaller one.
 // ============================================================================
 // MODERN C++ QUICK REFERENCE (readers catching up on C++11 -> C++20)
 // This file is intentionally small but exercises the post-2011 idioms that
@@ -221,100 +227,10 @@ inline double linear_interp(const std::vector<double>& xs, const std::vector<dou
 // holidays rather than counting every Mon-Fri weekday. Serial dates are the
 // Excel 1900 system (same as Python's `date(1899,12,30) + serial`).
 // ---------------------------------------------------------------------------
-struct CivilDate {
-    int year{};
-    int month{};
-    int day{};
-};
-
-inline CivilDate civil_from_serial(int serial) {
-    // Howard Hinnant's days_from_civil inverse; z is days since 1970-01-01.
-    const long z = static_cast<long>(serial) - 25569L + 719468L;
-    const long era = (z >= 0 ? z : z - 146096L) / 146097L;
-    const unsigned doe = static_cast<unsigned>(z - era * 146097L);
-    const unsigned yoe = (doe - doe / 1460U + doe / 36524U - doe / 146096U) / 365U;
-    const int year = static_cast<int>(yoe) + static_cast<int>(era) * 400;
-    const unsigned doy = doe - (365U * yoe + yoe / 4U - yoe / 100U);
-    const unsigned mp = (5U * doy + 2U) / 153U;
-    const unsigned day = doy - (153U * mp + 2U) / 5U + 1U;
-    const unsigned month = mp + (mp < 10U ? 3U : static_cast<unsigned>(-9));
-    return {year + (month <= 2U ? 1 : 0), static_cast<int>(month), static_cast<int>(day)};
-}
-
-inline long days_from_civil(int year, unsigned month, unsigned day) {
-    year -= month <= 2U;
-    const long era = (year >= 0 ? year : year - 399) / 400;
-    const unsigned yoe = static_cast<unsigned>(year - era * 400);
-    const unsigned mp = month > 2U ? month - 3U : month + 9U;
-    const unsigned doy = (153U * mp + 2U) / 5U + day - 1U;
-    const unsigned doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;
-    return era * 146097L + static_cast<long>(doe) - 719468L;
-}
-
-inline int serial_from_ymd(int year, int month, int day) {
-    return static_cast<int>(days_from_civil(year, static_cast<unsigned>(month), static_cast<unsigned>(day)) + 25569L);
-}
-
-inline int weekday_mon0(int serial) {  // 0=Mon .. 6=Sun (1970-01-01 was a Thursday)
-    const long z = static_cast<long>(serial) - 25569L;
-    return static_cast<int>(((z % 7) + 10) % 7);
-}
-
-inline int observed_weekday(int year, int month, int day) {
-    const int serial = serial_from_ymd(year, month, day);
-    const int w = weekday_mon0(serial);
-    if (w == 5) return serial - 1;  // Saturday -> preceding Friday
-    if (w == 6) return serial + 1;  // Sunday -> following Monday
-    return serial;
-}
-
-inline int nth_weekday_of_month(int year, int month, int n, int target) {
-    const int first = serial_from_ymd(year, month, 1);
-    const int delta = (target - weekday_mon0(first) + 7) % 7;
-    return first + delta + (n - 1) * 7;
-}
-
-inline int last_weekday_of_month(int year, int month, int target) {
-    const int next_month = month == 12 ? 1 : month + 1;
-    const int next_year = month == 12 ? year + 1 : year;
-    const int last = serial_from_ymd(next_year, next_month, 1) - 1;
-    return last - ((weekday_mon0(last) - target + 7) % 7);
-}
-
-inline int easter_sunday(int year) {
-    // Anonymous Gregorian computus.
-    const int a = year % 19, b = year / 100, c = year % 100, d = b / 4, e = b % 4;
-    const int f = (b + 8) / 25, g = (b - f + 1) / 3, h = (19 * a + b - d - g + 15) % 30;
-    const int i = c / 4, k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7;
-    const int m = (a + 11 * h + 22 * l) / 451;
-    const int month = (h + l - 7 * m + 114) / 31;
-    const int day = ((h + l - 7 * m + 114) % 31) + 1;
-    return serial_from_ymd(year, month, day);
-}
-
-inline bool is_us_market_holiday(int serial) {
-    const CivilDate c = civil_from_serial(serial);
-    const int y = c.year;
-    if (serial == observed_weekday(y, 1, 1)) return true;              // New Year's Day
-    if (serial == nth_weekday_of_month(y, 1, 3, 0)) return true;        // MLK Day
-    if (serial == nth_weekday_of_month(y, 2, 3, 0)) return true;        // Washington's Birthday
-    if (serial == easter_sunday(y) - 2) return true;                    // Good Friday
-    if (serial == last_weekday_of_month(y, 5, 0)) return true;          // Memorial Day
-    if (y >= 2022 && serial == observed_weekday(y, 6, 19)) return true; // Juneteenth
-    if (serial == observed_weekday(y, 7, 4)) return true;               // Independence Day
-    if (serial == nth_weekday_of_month(y, 9, 1, 0)) return true;        // Labor Day
-    if (serial == nth_weekday_of_month(y, 11, 4, 3)) return true;       // Thanksgiving
-    if (serial == observed_weekday(y, 12, 25)) return true;             // Christmas
-    return false;
-}
-
-inline std::vector<int> nyse_schedule(int start, int end) {
-    std::vector<int> dates;
-    for (int serial = start; serial <= end; ++serial) {
-        if (weekday_mon0(serial) <= 4 && !is_us_market_holiday(serial)) dates.push_back(serial);
-    }
-    return dates;
-}
+// The NYSE calendar lives in include/fina_risk/nyse_calendar.hpp so that a
+// test can compare it against the Python copy in daily_termsheet.py.
+// Moved verbatim; see that header for why.
+using fina::risk::cal::nyse_schedule;
 
 // ---------------------------------------------------------------------------
 // Full eqVol surface read. The legacy grid is [maturity][strike] in percent.
@@ -545,6 +461,36 @@ RiskResult price_fixture(const std::string& request_json, std::size_t paths, std
     // zero because those legs carry strikeKI2 = 0.
     const bool european_knock_in = knock_in_type != "Continuous";
     const double global_barrier = deal.value("RGACCLKO", json::object()).value("gblBarPrice", 1.10);
+    // Per-asset call latch, seeded from the deal.
+    //
+    // The Daily Callable Condition is "if EACH of the Reference Asset in the
+    // Reference Basket has BECOME a Memorised Reference Asset on a Call Fixing
+    // Date" (term sheet). "Become" is what makes it a latch: an asset that was
+    // at or above its Call Price on any earlier Call Fixing Date is one from
+    // then on. The playbook says the same in its own words -- the product
+    // "remembers which underlyings have already hit their barriers (tracked by
+    // per-stock 'locked' flags and dates in the flex block)" -- and the flex
+    // block here literally carries that state: KIKOSelect.GKOLocked is one flag
+    // per asset with a GKODate beside it.
+    //
+    // So a trade that arrives part-way through its life arrives with part of the
+    // basket already latched, and the pricer has to start from that. This used
+    // to read nothing here and to run a joint test across the basket on each
+    // single fixing, which can only ever fire when every asset is above the
+    // barrier *simultaneously*. For termsheet1 that happens to give the same
+    // answer (ADBE latched, AMZN not, so not callable either way), which is why
+    // it survived: the one deal in the book that exercises the latch is the one
+    // deal where the latch does not change the result.
+    //
+    // The latch date is not checked here, and pricing.py does not check it
+    // either. One rule in both lanes so they stay comparable; the gap is real
+    // and is recorded rather than half-fixed.
+    std::vector<bool> gko_locked(refs.size(), false);
+    if (const auto kiko = deal.find("KIKOSelect"); kiko != deal.end() && kiko->is_object()) {
+        const auto locked = kiko->value("GKOLocked", json::array());
+        for (std::size_t i = 0; i < refs.size() && i < locked.size(); ++i)
+            gko_locked[i] = locked.at(i).get<bool>();
+    }
     const int evaluation_date = request.at("marketData").value("evaluationDate", 0);
     const int expiry_date = deal.value("expiryDate", deal.value("maturityDate", evaluation_date));
     const double time = std::max(expiry_date - evaluation_date, 0) / 365.0;
@@ -607,21 +553,23 @@ RiskResult price_fixture(const std::string& request_json, std::size_t paths, std
         std::vector<double> log_spot(quoted.size());
         for (std::size_t i = 0; i < quoted.size(); ++i) log_spot[i] = std::log(quoted[i]);
         bool called = false;
+        // A path-level copy, seeded from the deal's own latch, because the two
+        // underlyings share one latch state and the state has to persist across
+        // fixings: a path where AMZN fell back under its call price after
+        // latching is still latched for AMZN.
+        std::vector<bool> latched = gko_locked;
         for (int step = 0; step < steps; ++step) {
             const double z1 = normal(rng);
             const double z2 = correlation * z1 + orthogonal_scale * normal(rng);
-            // Conservative global-KO read: the daily auto-call requires every
-            // underlying at/above the 110% call barrier on the SAME fixing;
-            // pre-locked memory state is intentionally not credited (that only
-            // makes the call easier and would lower the reserve).
-            bool all_above = true;
+            bool all_latched = true;
             for (std::size_t i = 0; i < quoted.size(); ++i) {
                 const double z = i == 0 ? z1 : z2;
                 log_spot[i] += (rate - dividends[i] - 0.5 * vols[i] * vols[i]) * dt
                     + vols[i] * std::sqrt(dt) * z;
-                if (std::exp(log_spot[i]) / refs[i] < global_barrier) all_above = false;
+                if (std::exp(log_spot[i]) / refs[i] >= global_barrier) latched[i] = true;
+                if (!latched[i]) all_latched = false;
             }
-            if (all_above) called = true;
+            if (all_latched) called = true;
         }
         double worst = 10.0;
         for (std::size_t i = 0; i < refs.size(); ++i) worst = std::min(worst, std::exp(log_spot[i]) / refs[i]);
@@ -636,11 +584,16 @@ RiskResult price_fixture(const std::string& request_json, std::size_t paths, std
     const auto rates = rg.value("accruRate", json::array());
     const auto paid = rg.value("N1", json::array());
     const auto total = rg.value("N2", json::array());
+    // Read the quote scale from the deal, exactly as the daily-term-sheet lane in
+    // this same file does (run_daily_termsheet, "legacyCouponQuoteScale"). It used
+    // to be a bare 10.0 literal here, so a deal that set the field to anything else
+    // was silently ignored on this path while being honoured on the other one.
+    const double coupon_quote_scale = deal.value("legacyCouponQuoteScale", 10.0);
     const double notional = deal.value("notional", 1.0);
     for (std::size_t i = 0; i < ends.size() && i < payments.size() && i < rates.size() && i < paid.size() && i < total.size(); ++i) {
         const int unpaid = std::max(total.at(i).get<int>() - paid.at(i).get<int>(), 0);
         const int fixings = std::max(total.at(i).get<int>(), 1);
-        coupon += 10.0 * rates.at(i).get<double>() * static_cast<double>(unpaid) / fixings
+        coupon += coupon_quote_scale * rates.at(i).get<double>() * static_cast<double>(unpaid) / fixings
             * std::exp(-rate * std::max(payments.at(i).get<int>() - evaluation_date, 0) / 365.0);
     }
     const double funding = discount_factor;
@@ -1075,6 +1028,19 @@ namespace {
 //     giving daily / weekly / monthly schedules. All map into the one shared
 //     (paths, observations, underlyings) cube, so path sharing is preserved.
 struct CompactDaily {
+    // Units differ between these fields, which is why they are named here rather
+    // than left to the reader:
+    //   put      -- per unit of notional (a ratio PV; `strike` is a ratio, and
+    //               there is no notional division because there is no notional).
+    //   funding  -- absolute discount factor, not money.
+    //   coupon   -- per unit of notional, times `quote_scale` (the ten-point
+    //               price quotation convention). This is the ONE field that is
+    //               notional-normalised and quote-scaled, so `pv` below is a sum
+    //               of three different conventions. That is acceptable for a
+    //               benchmark corpus whose purpose is timing, and it is NOT the
+    //               bookable result: the pricing lane is engine.cpp, where the
+    //               leg/cashflow units are separated and each leg states its own.
+    //               Do not reuse this struct for a price.
     double pv{};
     double put{};
     double coupon{};

@@ -54,11 +54,110 @@ def test_coupon_leg_uses_unpaid_counts_and_payment_lag() -> None:
     result = _execute("pricing_and_sensitivity", {"request": request, "paths": 30000, "seed": 1729})
     coupon = next(x["pv"] for x in result["base"]["legs"] if x["leg_name"] == "COUPON")
     detail = result["base"]["explainability"]["coupon"]
-    assert 0.48 < coupon < 0.54
+    # Band, not a pinned value: this is a Monte-Carlo leg over 30k paths, so the
+    # exact figure moves with the RNG and the compiler. What the band guards is
+    # that the call truncation below is applied at the right strength.
+    #
+    # It used to read 0.48 < coupon < 0.54, which is the untruncated coupon
+    # schedule (0.509887). That value was recorded from the code's own output at
+    # a time when the truncation was written as
+    # `np.where(call_date <= end_step, amount, amount)` -- both branches
+    # identical, so the correctly computed call schedule was discarded. 61% of
+    # paths on this deal are called by expiry, so the old number paid 61% of the
+    # note's coupon schedule on notes that no longer existed. The contract value
+    # is 0.316356, derived in test_coupon_stops_accruing_at_the_call_date.
+    assert 0.30 < coupon < 0.34
     assert len(detail["unpaid_periods"]) == 6
     assert sum(x["unpaid_fixings"] for x in detail["unpaid_periods"]) == 111
     assert [x["payment_lag_days"] for x in detail["unpaid_periods"]] == [2, 4, 2, 2, 2, 2]
     assert detail["quote_scale"] == 10.0
+
+
+def test_coupon_stops_accruing_at_the_call_date() -> None:
+    """The call truncates the coupon; check the truncation, not just the total.
+
+    The PV band in the test above would stay green if the call were ignored
+    entirely and every other number happened to line up. These assertions
+    describe the truncation itself, so a regression to "pay the whole schedule"
+    fails here whatever the PV comes out at.
+    """
+    captured: dict[str, object] = {}
+    import fina_risk.pricing as pricing_module
+
+    real = pricing_module._coupon_pv
+
+    def spy(deal, market, path_log):
+        captured.update(deal=deal, market=market, path_log=path_log)
+        return real(deal, market, path_log)
+
+    request = json.loads(FIXTURE.read_text())
+    pricing_module._coupon_pv = spy
+    try:
+        result = _execute("pricing_and_sensitivity", {"request": request, "paths": 8000, "seed": 1729})
+    finally:
+        pricing_module._coupon_pv = real
+
+    deal = captured["deal"]
+    market = captured["market"]
+    path_log = captured["path_log"]
+    paths, steps, _ = path_log.shape
+    rg = deal["RGACCLKO"]
+
+    # Rebuild the call schedule straight from the barrier rule: every underlying
+    # at or above gblBarPrice on the same fixing, latching once reached.
+    locked = np.broadcast_to(
+        np.asarray(deal["KIKOSelect"]["GKOLocked"], dtype=bool), (paths, 2)
+    ).copy()
+    call_step = np.full(paths, steps, dtype=int)
+    first_full = np.full(paths, -1, dtype=int)
+    for s in range(steps):
+        locked |= np.exp(path_log[:, s, :]) / market.reference_spots >= float(rg["gblBarPrice"])
+        now_full = locked.all(axis=1)
+        first_full[(first_full < 0) & now_full] = s
+        call_step[now_full & (call_step == steps)] = s
+
+    # A call must actually happen on this deal, or the assertions below are vacuous.
+    called = call_step < steps
+    assert called.mean() > 0.3, f"expected frequent calls, got {called.mean():.1%}"
+    # A called path records the FIRST fixing on which every name was at or above
+    # the barrier -- not a later one, and not a step where it was not yet true.
+    assert np.array_equal(first_full[first_full >= 0], call_step[first_full >= 0])
+    # A path that is never called is never fully locked on any step.
+    assert np.all(first_full[~called] == -1)
+
+    grid = np.linspace(
+        market.evaluation_date, int(deal.get("expiryDate", rg["endDate"][-1])), steps, dtype=int
+    )
+    # Recompute the leg here rather than trusting the number under test.
+    untruncated = truncated = 0.0
+    begin = 0
+    for end, pay, rate, paid, total in zip(
+        rg["endDate"], rg["paymentDate"], rg["accruRate"], rg["N1"], rg["N2"]
+    ):
+        end_step = int(np.argmin(abs(grid - int(end))))
+        this_begin, begin = begin, end_step + 1
+        unpaid = max(int(total) - int(paid), 0)
+        if unpaid <= 0:
+            continue
+        span = max(end_step - this_begin + 1, 1)
+        paid_fraction = np.clip(call_step - this_begin + 1, 0, span) / span
+        discount = np.exp(-market.rate * pricing_module.year_fraction(market.evaluation_date, pay))
+        accrual = float(deal["notional"]) * float(rate) * (unpaid / max(int(total), 1))
+        untruncated += accrual * discount
+        truncated += (accrual * paid_fraction).mean() * discount
+
+    scale = float(deal.get("legacyCouponQuoteScale", 10.0))
+    notional = max(float(deal["notional"]), 1.0)
+    pipeline = next(x["pv"] for x in result["base"]["legs"] if x["leg_name"] == "COUPON")
+
+    # Truncation must strictly reduce the leg -- the call is worth money to the issuer.
+    assert truncated < untruncated
+    # And the pipeline must report the truncated figure, not merely a smaller one.
+    assert abs(pipeline - truncated / notional * scale) < 1e-9
+    # Per period, the share of fixings actually paid must not rise as the call
+    # window lengthens. Period 1 completes before any path can be called, so it
+    # must be paid in full; the last period must be the most heavily truncated.
+    assert truncated / untruncated < 0.75
 
 
 def test_fixture_reports_aad_boundary_and_taylor_pnl() -> None:

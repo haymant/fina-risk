@@ -11,7 +11,7 @@ std::string assemble_json(const EngineResult& result) {
     json legs = json::array();
     for (const auto& leg : result.legs) {
         legs.push_back({{"id", leg.id}, {"name", leg.name}, {"role", leg.role}, {"pv", leg.pv},
-                        {"currency", leg.currency}, {"payoff_graph_node", leg.payoff_graph_node},
+                        {"currency", leg.currency}, {"unit", leg.unit}, {"payoff_graph_node", leg.payoff_graph_node},
                         {"origin", leg.origin}, {"evidence_status", leg.evidence_status}});
     }
     json cashflows = json::array();

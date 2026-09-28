@@ -93,4 +93,46 @@ endif()
 if(FINA_RISK_BUILD_XAD_AAD)
   install(TARGETS fina-risk-cpp-aad RUNTIME DESTINATION bin)
 endif()
+# --- Block tests -------------------------------------------------------------
+# One test executable per payoff-graph block. These are deliberately NOT linked
+# against fina_risk_core: a block kernel is a pure header function, so a block
+# test needs only the headers. That keeps each test free of the JSON layer, the
+# path cube, and the pricing loop, which is what makes a block independently
+# checkable against its term-sheet specification.
+#
+# They must not be compiled with -ffast-math. A block test asserts specified
+# arithmetic, so the comparison is to a tolerance; reassociation would move the
+# last bits and turn a specification check into a compiler check.
+include(CTest)
+add_executable(fina-risk-block-coupon-strip tests/coupon_strip_test.cpp)
+target_include_directories(fina-risk-block-coupon-strip PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME block/coupon_strip COMMAND fina-risk-block-coupon-strip)
+
+# The NYSE calendar is implemented twice -- here in C++ and again in
+# src/fina_risk/daily_termsheet.py. This test checks the C++ side against
+# invariants and dumps the schedule on stdout; tests/test_nyse_calendar.py
+# then diffs that dump against the Python copy day for day.
+add_executable(fina-risk-block-nyse-calendar tests/nyse_calendar_test.cpp)
+target_include_directories(fina-risk-block-nyse-calendar PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_test(NAME block/nyse_calendar COMMAND fina-risk-block-nyse-calendar 2015 2040)
+
+# A LANE test, not a block test, and the prefix says so.
+#
+# The global-KO defect is not in a block. `resolve_ko` (barriers.hpp) is the
+# block, it is six lines, and it is correct. The defect is that
+# fina_risk_cpp.cpp's price_fixture never calls it: it inlines a joint test
+# across the basket on a single fixing and ignores the per-asset latch the deal
+# file states in KIKOSelect.GKOLocked. So the only way to test the defect is to
+# price a deal and look at the put, which means this test does need the JSON
+# layer, the path loop, and the library's -ffast-math policy -- all three of
+# which the block tests above are written to avoid.
+#
+# That is not a workaround; it is the point. A block test for global_ko_gate
+# would pass today and prove nothing, because the kernel it names is never
+# reached from this lane. Naming the test `lane/` keeps the distinction visible
+# in ctest output rather than hiding a lane test among block tests.
+add_executable(fina-risk-lane-global-ko-latch tests/global_ko_latch_test.cpp)
+target_link_libraries(fina-risk-lane-global-ko-latch PRIVATE fina_risk_core)
+add_test(NAME lane/global_ko_latch COMMAND fina-risk-lane-global-ko-latch)
+
 install(TARGETS fina-risk-cpp-benchmark fina-risk-cpp-e2e fina-risk-cpp-parity fina-risk-cpp-daily-termsheet RUNTIME DESTINATION bin)

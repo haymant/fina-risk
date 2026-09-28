@@ -147,12 +147,27 @@ def market_from_legacy(
 ) -> Market:
     md = common.get("marketData", common)
     equities = md.get("equity", [])
-    names = tuple(str(x["_id"]) for x in equities[:2])
-    quoted: np.ndarray = np.asarray([float(x["spot"]) for x in equities[:2]], dtype=float)
-    reference: np.ndarray = np.asarray([float(x.get("reference", x["spot"])) for x in equities[:2]], dtype=float)
     # Deal economics contain the true initial fixing/reference spots.
     deal = common.get("dealData", {})
     underlyings = deal.get("instrument", {}).get("underlyings", [])
+    # This lane is two-name by construction, not by configuration: `Market` carries
+    # exactly two spots, the path cube is built as two correlated Brownian columns,
+    # and the local-vol branch is hardcoded to a pair. Every one of those used to
+    # slice `[:2]` quietly, so a three-name basket was accepted and priced as if the
+    # third underlying did not exist -- a plausible-looking PV for the wrong product.
+    # Refusing is the honest answer here; widening the lane to N names is a change
+    # to the product, not a bug fix, and is discussed in the block book.
+    _declared = max(len(equities), len(underlyings))
+    if _declared > 2:
+        raise ValueError(
+            f"termsheet declares {_declared} underlyings but this lane prices a two-name "
+            f"basket only (market equity={len(equities)}, deal instrument.underlyings={len(underlyings)}). "
+            "Refusing rather than truncating the basket: a wider basket needs a wider path "
+            "cube, a wider Market and a wider local-vol surface, none of which exist here."
+        )
+    names = tuple(str(x["_id"]) for x in equities[:2])
+    quoted: np.ndarray = np.asarray([float(x["spot"]) for x in equities[:2]], dtype=float)
+    reference: np.ndarray = np.asarray([float(x.get("reference", x["spot"])) for x in equities[:2]], dtype=float)
     if underlyings:
         reference = np.asarray([float(x["spot"]) for x in underlyings[:2]], dtype=float)
     if spots is not None:
@@ -306,11 +321,18 @@ def _coupon_pv(deal: dict[str, Any], market: Market, path_log: np.ndarray) -> tu
             call_date[is_called] = step
     unpaid_periods: list[dict[str, Any]] = []
     coupon_total = np.zeros(paths, dtype=float)
+    # `observation_dates` is the per-step date grid; a coupon period runs from the
+    # step after the previous period ended through its own end step, inclusive.
+    # Tracked outside the loop because periods with nothing owed are skipped, and a
+    # skipped period still advances the window.
+    period_begin = 0
     for idx, (end, payment, rate, paid, total) in enumerate(zip(ends, payments, rates, n1, n2, strict=False)):
+        end_step = int(np.argmin(abs(observation_dates - int(end))))
+        this_begin = period_begin
+        period_begin = end_step + 1
         unpaid = max(int(total) - int(paid), 0)
         if unpaid <= 0:
             continue
-        end_step = int(np.argmin(abs(observation_dates - int(end))))
         total_fixings = max(int(total), 1)
         # N1/N2 are the authoritative legacy fixing counters.  The current
         # fixture's range is inactive (10% floor, no effective cap), so the
@@ -324,7 +346,24 @@ def _coupon_pv(deal: dict[str, Any], market: Market, path_log: np.ndarray) -> tu
         unpaid_fraction = unpaid / total_fixings
         amount = float(deal.get("notional", 0.0)) * float(rate) * accrual_fraction
         amount *= np.minimum(unpaid_fraction / np.maximum(accrual_fraction, 1e-12), 1.0)
-        amount = np.where(call_date <= end_step, amount, amount)
+        # The note stops paying coupons once it is called. `call_date` holds, per
+        # path, the step on which every underlying was at or above the call
+        # barrier on the same fixing, and stays at `steps` for a path that never
+        # calls. On a call the note pays "any accrued but unpaid Potential Cash
+        # Dividend Amount calculated up to (and including) the Call Fixing Date",
+        # so: a period that ended before the call pays in full; the period
+        # containing the call pays only the fixings up to and including the call;
+        # a period that starts after the call pays nothing at all.
+        #
+        # This line used to read `np.where(call_date <= end_step, amount, amount)`
+        # -- both branches identical. The call schedule was computed correctly on
+        # every path and then discarded, so every called path went on paying its
+        # entire remaining coupon schedule. The only correct reading of a
+        # `np.where` whose branches match is that something was meant to differ;
+        # what the contract specifies is the elapsed fraction below.
+        span = max(end_step - this_begin + 1, 1)
+        elapsed = np.clip(call_date - this_begin + 1, 0, span)
+        amount = amount * (elapsed / span)
         payment_df = np.exp(-market.rate * year_fraction(market.evaluation_date, payment))
         coupon_total += amount * payment_df
         unpaid_periods.append(

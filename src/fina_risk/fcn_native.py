@@ -130,6 +130,16 @@ def build_daily_path_cube(request: dict[str, Any]) -> tuple[np.ndarray, np.ndarr
     strike_ratio = float(payoff.get("strike", 0.78))
     ki_ratio = float(payoff.get("knock_in", {}).get("barrier", 0.70))
     pillars = market.get("curves", [{}])[0].get("pillars", [])
+    # Refuse to price without a discount curve. `_curve_rate_at` returns 0.0 when
+    # it has no points, so every cashflow was discounted at zero and the note came
+    # out at its undiscounted value. The C++ engine refuses the same case with the
+    # same wording; both lanes must agree, or a parity test would be comparing a
+    # priced note against a refusal.
+    if not [p for p in pillars if p.get("date") is not None and p.get("rate") is not None]:
+        raise ValueError(
+            "no discount curve: market_data.curves[].pillars is absent or empty, "
+            "so cashflows cannot be discounted"
+        )
     parameters = request["parameters"]
     paths = int(parameters.get("paths", 30000))
     if paths < 1:
