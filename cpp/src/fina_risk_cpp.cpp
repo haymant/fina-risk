@@ -1,5 +1,6 @@
 #include "fina_risk_cpp.hpp"
 #include "fina_risk/engine.hpp"
+#include "fina_risk/lane_dispatch.hpp"
 #include "fina_risk/locvol.hpp"
 #include "fina_risk/nyse_calendar.hpp"
 
@@ -1284,6 +1285,88 @@ std::string run_fcn_rakiplus_json(const std::string& canonical_request_json,
                                   const std::vector<int>& dates) {
     return fcn::price_canonical_request_json(
         canonical_request_json, paths, paths_count, observations, underlyings, dates);
+}
+
+// The one term-sheet-driven entry point. Unlike the five lane kernels above it
+// does not know which lane it is: it reads the request/market shapes, lets the
+// classifier (lane_dispatch.hpp) choose, and either refuses with a dispatch
+// envelope or delegates to the chosen kernel and merges an additive `dispatch`
+// key into the result. Consumers that read by key are unaffected; a lane result
+// can be round-tripped into run_daily_termsheet-style parsers unchanged.
+//
+// `terminal` and `daily` are mutually exclusive cube views (float32 P×U for the
+// parity lane, float64 P×O×U for the daily lanes) -- the pybind layer decides
+// which by cube dimensionality and passes only the one that matches. The
+// trailing knobs are forwarded per lane: mc_paths/seed to price_fixture,
+// seed/bump to run_cpp_parity, bump to the daily lane; the batch and FCN lanes
+// ignore them (their call shapes predate the dispatcher and take no bump).
+std::string run_termsheet(const std::string& request_json,
+                          const std::string& market_json,
+                          const std::vector<float>& terminal,
+                          const std::vector<double>& daily,
+                          std::size_t paths_count,
+                          std::size_t observations,
+                          std::size_t underlyings,
+                          const std::vector<int>& dates,
+                          std::size_t mc_paths,
+                          std::uint64_t seed,
+                          double bump) {
+    const json request = json::parse(request_json);
+    const json market = market_json.empty() ? json::object() : json::parse(market_json);
+
+    dispatch::DispatchInputs inputs;
+    inputs.has_terminal_cube = !terminal.empty();
+    inputs.has_daily_cube = !daily.empty();
+    inputs.has_dates = !dates.empty();
+
+    const dispatch::LaneChoice choice = dispatch::pick_lane(request, market, inputs);
+
+    // A refusal carries the would-be lane (or none for unrecognized shapes) plus
+    // every mismatch, so a caller can fix the inputs instead of guessing again.
+    if (!choice.valid()) {
+        json refusal;
+        refusal["status"] = "refused";
+        refusal["dispatch"] = {{"lane", dispatch::lane_name(choice.lane)},
+                               {"chosen_reason", choice.chosen_reason},
+                               {"refusals", choice.refusals}};
+        return refusal.dump(2);
+    }
+
+    std::string payload;
+    switch (choice.lane) {
+        case dispatch::Lane::price_fixture:
+            payload = to_json(price_fixture(request_json, mc_paths, seed));
+            break;
+        case dispatch::Lane::run_cpp_parity:
+            payload = to_json(run_cpp_parity(request_json, market_json, terminal, seed, bump));
+            break;
+        case dispatch::Lane::run_daily_termsheet:
+            payload = run_daily_termsheet_json(request_json, daily, paths_count, observations,
+                                               underlyings, dates, bump);
+            break;
+        case dispatch::Lane::run_daily_termsheet_batch:
+            payload = run_daily_termsheet_batch_json(request_json, market_json, daily,
+                                                     paths_count, observations, underlyings, dates);
+            break;
+        case dispatch::Lane::price_fcn_rakiplus:
+            payload = run_fcn_rakiplus_json(request_json, daily, paths_count, observations,
+                                            underlyings, dates);
+            break;
+        case dispatch::Lane::none:
+        default:
+            // Guarded by valid() above; kept for exhaustiveness.
+            return json{{"status", "refused"},
+                        {"dispatch",
+                         {{"lane", "none"},
+                          {"chosen_reason", "no lane was chosen"},
+                          {"refusals", json::array({dispatch::kUnknownShapeRefusal})}}}}
+                .dump(2);
+    }
+
+    json result = json::parse(payload);
+    result["dispatch"] = {{"lane", dispatch::lane_name(choice.lane)},
+                          {"chosen_reason", choice.chosen_reason}};
+    return result.dump(2);
 }
 
 }  // namespace fina::risk

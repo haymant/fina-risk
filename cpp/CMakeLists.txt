@@ -131,6 +131,18 @@ target_link_libraries(fina-risk-block-locvol PRIVATE nlohmann_json::nlohmann_jso
 add_test(NAME block/locvol COMMAND fina-risk-block-locvol
   ${CMAKE_CURRENT_SOURCE_DIR}/../skills/fina-risk/refs/termsheet1.md.json)
 
+# The term-sheet lane dispatcher: a pure classifier that reads the root keys
+# and the inputs that actually exist (cube dimensionality, dates) and chooses
+# the one lane that serves the shape -- or refuses. It is the decision half of
+# the dispatcher; run_termsheet in fina_risk_cpp.cpp is the execution half.
+# Same shape as the other block tests: nlohmann_json only, never fina_risk_core,
+# so it never sees -ffast-math. It prints CASE/REFUSED lines that
+# tests/test_lane_dispatch.py diffs against an independently hand-derived table.
+add_executable(fina-risk-block-lane-dispatch tests/lane_dispatch_test.cpp)
+target_include_directories(fina-risk-block-lane-dispatch PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(fina-risk-block-lane-dispatch PRIVATE nlohmann_json::nlohmann_json)
+add_test(NAME block/lane_dispatch COMMAND fina-risk-block-lane-dispatch)
+
 # A LANE test, not a block test, and the prefix says so.
 #
 # The global-KO defect is not in a block. `resolve_ko` (barriers.hpp) is the
@@ -149,5 +161,13 @@ add_test(NAME block/locvol COMMAND fina-risk-block-locvol
 add_executable(fina-risk-lane-global-ko-latch tests/global_ko_latch_test.cpp)
 target_link_libraries(fina-risk-lane-global-ko-latch PRIVATE fina_risk_core)
 add_test(NAME lane/global_ko_latch COMMAND fina-risk-lane-global-ko-latch)
+
+# A LANE test: run_termsheet is the dispatcher's execution half. It needs the
+# JSON layer and the library (the fixture case actually prices through
+# price_fixture), so it is a lane test, not a block test. It exercises the
+# pick/delegate/refuse path end-to-end from the one entry point.
+add_executable(fina-risk-lane-termsheet-dispatch tests/termsheet_dispatch_test.cpp)
+target_link_libraries(fina-risk-lane-termsheet-dispatch PRIVATE fina_risk_core)
+add_test(NAME lane/termsheet_dispatch COMMAND fina-risk-lane-termsheet-dispatch)
 
 install(TARGETS fina-risk-cpp-benchmark fina-risk-cpp-e2e fina-risk-cpp-parity fina-risk-cpp-daily-termsheet RUNTIME DESTINATION bin)

@@ -104,6 +104,27 @@ std::string run_fcn_rakiplus_json(const std::string& canonical_request_json,
                                   std::size_t underlyings,
                                   const std::vector<int>& dates);
 
+// The one term-sheet-driven entry point. Reads the request/market shapes,
+// picks the lane (see include/fina_risk/lane_dispatch.hpp), delegates to the
+// matching kernel above, and merges an additive `dispatch` key into the result
+// so consumers that read by key are unaffected. On a mismatch it refuses with
+// {"status": "refused", "dispatch": {"lane", "chosen_reason", "refusals"}}
+// instead of guessing. `terminal` is the (P, U) float32 parity cube,
+// `daily` the (P, O, U) float64 daily cube; exactly one is non-empty unless
+// the lane simulates internally. `mc_paths`/`seed` serve price_fixture,
+// `seed`/`bump` serve run_cpp_parity, `bump` serves the daily lane.
+std::string run_termsheet(const std::string& request_json,
+                          const std::string& market_json = "",
+                          const std::vector<float>& terminal = {},
+                          const std::vector<double>& daily = {},
+                          std::size_t paths_count = 0,
+                          std::size_t observations = 0,
+                          std::size_t underlyings = 0,
+                          const std::vector<int>& dates = {},
+                          std::size_t mc_paths = 30000,
+                          std::uint64_t seed = 1729,
+                          double bump = 0.01);
+
 std::string to_json(const BenchmarkResult& result);
 std::string to_json(const ParityResult& result);
 std::string to_json(const RiskResult& result);
