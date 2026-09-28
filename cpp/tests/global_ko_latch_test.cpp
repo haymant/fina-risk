@@ -89,6 +89,16 @@ void expect_true(const std::string& what, bool ok) {
 // interpolates to a total variance of 0 and then floors at 1e-12, so the vol
 // actually used is 1e-6 / sqrt(t) -- about 1.5e-6. Over a thousand steps that
 // moves a log-price by ~3e-6, which cannot reach a barrier 0.6 away.
+//
+// This grid is also why the request sets `localVol: false` (see make_request
+// below). price_fixture now builds a Dupire surface when it can, and a zero
+// implied surface is NOT flat under Dupire: sigma_LV^2 = dT w / denominator is
+// 0 / 1, and the clamp raises it to the 10% floor. A lane that wanted "no
+// volatility" and got local vol by default would price these cases as if the
+// market moved 10% a year, and the barrier comparisons would be decided by a
+// draw rather than by arithmetic. The opt-out is explicit and per-request so
+// that it is visible here, rather than a default in the lane that this test
+// silently depends on.
 // ---------------------------------------------------------------------------
 json vol_grid(const std::string& id, int eval, int expiry) {
     return json{{"_id", id},
@@ -142,9 +152,13 @@ json make_request(const Basket& b) {
                      {"expiryDate", b.expiry},
                      {"notional", 1.0}};
 
+    // localVol: false, because the flat 0% grid above is a deterministic-case
+    // device and a zero implied surface is a 10% surface under Dupire. See
+    // vol_grid's comment.
     json market = json{{"evaluationDate", b.eval},
                        {"equity", equity},
                        {"eqVol", eq_vol},
+                       {"localVol", false},
                        {"corr", json::array({json::array(
                                          {json{{"correlation", 0.0}}})})}};
     if (b.curve_rate != 0.0) {

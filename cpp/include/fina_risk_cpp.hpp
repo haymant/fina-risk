@@ -11,6 +11,14 @@ struct LegResult {
     std::string name;
     int multiplier{};
     double pv{};
+    // "per_unit" for every leg here. The put and the funding leg are per unit of
+    // notional, and so is the coupon leg: price_fixture divides its cash coupon
+    // by nothing and multiplies the quoted rate by the deal's quote scale, so the
+    // leg it produces is already on the same per-unit footing. The field is
+    // there so a consumer is told that rather than having to infer it from the
+    // deal's notional, and result_assembly.cpp's assemble_json emits the same
+    // convention for the lanes that go through it.
+    std::string unit{"per_unit"};
 };
 
 struct RiskResult {

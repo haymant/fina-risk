@@ -116,6 +116,21 @@ add_executable(fina-risk-block-nyse-calendar tests/nyse_calendar_test.cpp)
 target_include_directories(fina-risk-block-nyse-calendar PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_test(NAME block/nyse_calendar COMMAND fina-risk-block-nyse-calendar 2015 2040)
 
+# The Dupire local-vol surface is implemented twice -- here in C++
+# (include/fina_risk/locvol.hpp, used by price_fixture) and again in Python
+# (src/fina_risk/locvol.py, used by pricing._simulate_locvol). Same shape as the
+# calendar test: assert the properties the Dupire transform must have, and print
+# sigma(t, S) so tests/test_locvol.py can diff it against the Python copy.
+#
+# It links nlohmann_json only to read the term sheet's eqVol grids. It does not
+# link fina_risk_core, so it never sees the library's -ffast-math policy -- the
+# price_fixture lane that now calls this surface is a lane, and is tested as one.
+add_executable(fina-risk-block-locvol tests/locvol_test.cpp)
+target_include_directories(fina-risk-block-locvol PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(fina-risk-block-locvol PRIVATE nlohmann_json::nlohmann_json)
+add_test(NAME block/locvol COMMAND fina-risk-block-locvol
+  ${CMAKE_CURRENT_SOURCE_DIR}/../skills/fina-risk/refs/termsheet1.md.json)
+
 # A LANE test, not a block test, and the prefix says so.
 #
 # The global-KO defect is not in a block. `resolve_ko` (barriers.hpp) is the

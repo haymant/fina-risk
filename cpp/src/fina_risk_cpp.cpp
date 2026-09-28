@@ -1,15 +1,20 @@
 #include "fina_risk_cpp.hpp"
 #include "fina_risk/engine.hpp"
+#include "fina_risk/locvol.hpp"
 #include "fina_risk/nyse_calendar.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <fstream>
+#include <memory>
 #include <numeric>
 #include <random>
 #include <stdexcept>
+#include <string>
 #include <unordered_map>
+#include <vector>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -502,8 +507,32 @@ RiskResult price_fixture(const std::string& request_json, std::size_t paths, std
     // Conservative full-surface read: interpolate the eqVol grid (linear in
     // strike; linear in total variance across maturities) at both the exercise
     // and knock-in moneyness and keep the higher (downside-wing) vol.
+    //
+    // These scalars are the local-vol lane's fallback and its degenerate case.
+    // When a Dupire surface can be built for a name (see `locals` below) the
+    // path loop samples sigma(t, S) per step per path instead of using this
+    // frozen pair; a flat implied surface reproduces it exactly, because
+    // sigma_LV collapses to the constant implied vol.
     std::vector<double> vols(refs.size(), 0.45);
     std::vector<double> dividends(refs.size(), 0.0);
+    // One Dupire surface per underlying that has both an eqVol grid and a spot.
+    // Null in that slot means "fall back to the frozen scalar above", which is
+    // also what a missing or malformed grid does -- a refactor that quietly
+    // drops local vol would leave the PV barely moved, so the choice is recorded
+    // in the result rather than inferred from it.
+    std::vector<std::shared_ptr<fina::risk::vol::LocalVolSurface>> locals(refs.size());
+    std::vector<std::string> locvol_names(refs.size());
+    // Local vol is on by default, and a payload opts out with
+    // marketData.localVol = false. The reason the switch has to exist: under
+    // Dupire a *zero* implied surface is a 10% surface, because sigma_LV^2 is
+    // 0 / 1 and the clamp floors it at kClampLo. A caller that builds a flat
+    // zero grid to get a deterministic or degenerate case -- which is exactly
+    // what the global-KO lane test does -- would otherwise be priced as if the
+    // market moved 10% a year. `localVol: false` restores the frozen scalar.
+    const bool use_local_vol = request.at("marketData").value("localVol", true);
+    // The scalar read always runs: `localVol: false` must restore the frozen
+    // scalar *read*, not skip it and leave the 0.45 default behind, or the
+    // opt-out would silently price every name at 45% volatility.
     if (request.at("marketData").contains("eqVol") && request.at("marketData").contains("equity")) {
         for (std::size_t i = 0; i < refs.size(); ++i) {
             for (const auto& surface : request.at("marketData").at("eqVol")) {
@@ -513,6 +542,33 @@ RiskResult price_fixture(const std::string& request_json, std::size_t paths, std
                 const double vol_exercise = surface_vol(surface, exercise_strike, expiry_date, evaluation_date);
                 const double knock_in_vol = surface_vol(surface, knock_in_strike, expiry_date, evaluation_date);
                 vols[i] = std::max(vol_exercise, knock_in_vol);
+                if (use_local_vol) {
+                    try {
+                        fina::risk::vol::ImpliedVolGrid grid;
+                        grid.id = surface.value("_id", "");
+                        for (const auto& s : surface.value("strike", json::array()))
+                            grid.strike.push_back(s.get<double>());
+                        for (const auto& m : surface.value("maturity", json::array()))
+                            grid.maturity.push_back(m.get<double>());
+                        for (const auto& row : surface.value("vol", json::array())) {
+                            std::vector<double> r;
+                            for (const auto& v : row) r.push_back(v.get<double>());
+                            grid.vol.push_back(std::move(r));
+                        }
+                        // The spot the surface is built around is the quoted one when
+                        // revaluing at a later date, else the deal's initial fixing:
+                        // the smile is quoted in log moneyness off the forward, so
+                        // the wrong reference shifts the whole surface.
+                        locals[i] = std::make_shared<fina::risk::vol::LocalVolSurface>(
+                            grid, evaluation_date, quoted[i], rate);
+                        locvol_names[i] = grid.id;
+                    } catch (const std::exception& e) {
+                        std::fprintf(stderr,
+                                     "price_fixture: no local vol for %s (%s); using the frozen "
+                                     "interpolated scalar %.6f for that name\n",
+                                     surface.value("_id", "").c_str(), e.what(), vols[i]);
+                    }
+                }
                 break;
             }
         }
@@ -547,6 +603,13 @@ RiskResult price_fixture(const std::string& request_json, std::size_t paths, std
     // per trading day over the actual schedule length.
     const std::vector<int> schedule = nyse_schedule(evaluation_date, expiry_date);
     const int steps = std::max(2, static_cast<int>(schedule.size()));
+    // Still a literal 1/252, which is a defect and is NOT fixed here: it
+    // integrates 103/252 = 0.408730y of variance over a 0.402740y life, so
+    // every name carries ~0.74% too much volatility and the simulated horizon
+    // disagrees with the one the discount factor uses. Fixing it changes
+    // lane/global_ko_latch's hand-derived expectations, which were derived
+    // against this step size, so it has to be its own change with its own
+    // re-derivation. It is deliberately not bundled with the local-vol work.
     const double dt = 1.0 / 252.0;
     const double orthogonal_scale = std::sqrt(std::max(1.0 - correlation * correlation, 0.0));
     for (std::size_t p = 0; p < paths; ++p) {
@@ -562,10 +625,16 @@ RiskResult price_fixture(const std::string& request_json, std::size_t paths, std
             const double z1 = normal(rng);
             const double z2 = correlation * z1 + orthogonal_scale * normal(rng);
             bool all_latched = true;
+            // Local vol is sampled at the start of the step, at the level the
+            // path is at now, which is the standard explicit (log-Euler)
+            // discretisation. The frozen scalar is the special case where no
+            // surface was built.
+            const double t_now = static_cast<double>(step) * dt;
             for (std::size_t i = 0; i < quoted.size(); ++i) {
                 const double z = i == 0 ? z1 : z2;
-                log_spot[i] += (rate - dividends[i] - 0.5 * vols[i] * vols[i]) * dt
-                    + vols[i] * std::sqrt(dt) * z;
+                const double sigma = locals[i] ? locals[i]->sigma(t_now, std::exp(log_spot[i])) : vols[i];
+                log_spot[i] += (rate - dividends[i] - 0.5 * sigma * sigma) * dt
+                    + sigma * std::sqrt(dt) * z;
                 if (std::exp(log_spot[i]) / refs[i] >= global_barrier) latched[i] = true;
                 if (!latched[i]) all_latched = false;
             }
@@ -834,7 +903,12 @@ std::string to_json(const BenchmarkResult& result) {
 
 std::string to_json(const RiskResult& result) {
     json legs = json::array();
-    for (const auto& leg : result.legs) legs.push_back({{"leg_name", leg.name}, {"multiplier", leg.multiplier}, {"pv", leg.pv}});
+    // `unit` alongside `pv`, so a consumer reading this cannot mistake a
+    // per-unit-of-notional leg for a cash leg. result_assembly.cpp's
+    // assemble_json emits it too; this one did not, and price_fixture -- the
+    // lane the term sheet goes through -- bypasses assemble_json entirely.
+    for (const auto& leg : result.legs)
+        legs.push_back({{"leg_name", leg.name}, {"multiplier", leg.multiplier}, {"pv", leg.pv}, {"unit", leg.unit}});
     return json{{"valuation", {{"pv", result.pv}}}, {"put_option_price", result.put_option_price}, {"legs", legs}}.dump(2);
 }
 
