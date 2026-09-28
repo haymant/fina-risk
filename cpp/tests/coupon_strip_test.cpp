@@ -45,9 +45,21 @@ void expect_rate(const char* name, const fina::risk::fcn::CouponPeriodTerms& per
     const double actual = fina::risk::fcn::period_rate(period, qualifying, carried);
     // 1e-12 absolute: the spec is a real number, the kernel is a double, and
     // fixed + range * fraction is not exactly representable in binary.
-    if (std::fabs(actual - expected) > 1e-12) {
+    //
+    // The finite check is not belt-and-braces, it is the difference between
+    // pinning a guard and not pinning it. Every IEEE comparison against NaN is
+    // false, so `fabs(actual - expected) > tol` is FALSE for a NaN and a NaN
+    // used to report as a pass. Deleting the `max(total_fixings, 1.0)` floor
+    // made this case return NaN, and the case whose comment says the guard is
+    // load-bearing went on passing -- verified by breaking it and re-running.
+    const bool finite = std::isfinite(actual);
+    if (!finite || std::fabs(actual - expected) > 1e-12) {
         ++g_failures;
-        std::printf("  FAIL  %-34s expected %.10f, got %.10f\n", name, expected, actual);
+        if (!finite) {
+            std::printf("  FAIL  %-34s expected %.10f, got non-finite (%f)\n", name, expected, actual);
+        } else {
+            std::printf("  FAIL  %-34s expected %.10f, got %.10f\n", name, expected, actual);
+        }
     } else {
         std::printf("  ok    %-34s %.10f\n", name, actual);
     }
@@ -102,6 +114,13 @@ int main() {
     // runs. The case is tested anyway: the guard is load-bearing, and a test
     // suite that only covers inputs the current pipeline happens to produce is a
     // suite that breaks when the pipeline changes.
+    //
+    // And it is load-bearing in a second sense: the two cases below are the ONLY
+    // ones that can see the `max(total_fixings, 1.0)` floor, because every other
+    // case has a non-zero total. Remove the floor and 0/0 makes the rate NaN.
+    // A NaN is not caught by a tolerance comparison -- every comparison against
+    // it is false -- so `expect_rate` checks finiteness explicitly. Without that
+    // check this case reports a pass with the guard deleted.
     expect_rate("zero_total_fixings_guard", period(0.005, 0.010, 0, 0), 0.0, 0.0, 0.005);
 
     // Same degenerate period, but with one unpaid fixing carried in. Against a
