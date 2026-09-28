@@ -88,16 +88,20 @@ uses the real NYSE calendar (101 fixings to the 2027-02-01 option expiry on a
 | terminal `price_fixture` (`locvol=False`, KI-gated scalar ATM) | 0.016970 | 0.000000 | 0.985048 | 0.968079 | — |
 | terminal `price_fixture` (`locvol=False`, **vanilla** — regression baseline) | 0.021429 | 0.000000 | 0.985048 | 0.963619 | — |
 | C++ `price_fixture` (surface + NYSE, resolved corr) | 0.020735 | 0.000000 | 0.984260 | 0.963745 | — |
-| canonical PV (PUT+FUNDING job1 + COUPON job3) | py 1.4735064 · cpp 1.4734669 · Δ 3.95e-05 | | | | |
+| canonical PV (PUT+FUNDING job1 + COUPON job3) | py 1.3437038 · cpp 1.3476263 · Δ 3.9e-03 (coupon job3: py 0.380634 · cpp 0.381160) | | | | |
 | **daily EKI (python == cpp, NYSE + surface + resolved corr)** | **0.020218** | **0.263057** | 0.984260 | **1.227888** | 0.1486 |
 | legacy engine reported | ~0.02113 | — | — | — | — |
 
 The canonical terminal PV moved from **1.4738664** (flat ρ=0.4593) to
 **1.4735064** (ρ=0.4041) — the lower lake correlation raises the worst-of PUT
-(+0.00036). The daily EKI lane is bit-exact Python==C++ (residual ~1e-14).
-Terminal C++ vs python residual (4e-05) is the pre-existing MC-model spread
-(C++ fixtures on NYSE day-steps + dividends + EKI/KO gates; python reference on
-a continuous 101-step, no-dividend kernel).
+(+0.00036) — and then to the current **1.343704** (py) / **1.347626** (cpp)
+when the `price_fixture` coupon stopped paying called paths and started
+counting the in-flight 1-Sep coupon in full (block-book correction 8; from
+0.509887 untruncated to 0.380634). The daily EKI lane is bit-exact
+Python==C++ (residual ~1e-14). Terminal C++ vs python residual (3.9e-03) is
+the pre-existing MC-model spread (C++ fixtures on NYSE day-steps + dividends +
+EKI/KO gates; python reference on a continuous 101-step, no-dividend kernel);
+the coupon leg itself now agrees to ~0.14% (0.380634 vs 0.381160).
 
 Daily EKI detail: `coupon_fixings=[18,22,20,22,19]`,
 `memory_carry=[2.2904,0,0,0,0]`, `ko_probability=0.5412`,

@@ -56,17 +56,19 @@ def test_coupon_leg_uses_unpaid_counts_and_payment_lag() -> None:
     detail = result["base"]["explainability"]["coupon"]
     # Band, not a pinned value: this is a Monte-Carlo leg over 30k paths, so the
     # exact figure moves with the RNG and the compiler. What the band guards is
-    # that the call truncation below is applied at the right strength.
+    # that the call truncation plus the full-accrual convention are applied at
+    # the right strength.
     #
-    # It used to read 0.48 < coupon < 0.54, which is the untruncated coupon
-    # schedule (0.509887). That value was recorded from the code's own output at
-    # a time when the truncation was written as
+    # History, kept because the band encodes two contracts now. It used to read
+    # 0.48 < coupon < 0.54, the untruncated schedule (0.509887), at a time when
+    # the correctly computed call schedule was thrown away by
     # `np.where(call_date <= end_step, amount, amount)` -- both branches
-    # identical, so the correctly computed call schedule was discarded. 61% of
-    # paths on this deal are called by expiry, so the old number paid 61% of the
-    # note's coupon schedule on notes that no longer existed. The contract value
-    # is 0.316356, derived in test_coupon_stops_accruing_at_the_call_date.
-    assert 0.30 < coupon < 0.34
+    # identical. The contract pro-rata (pricing.py:364-366) alone moved it to
+    # 0.316356; counting the in-flight 1-Sep period in full (block-book
+    # correction 8: fixed-but-unpaid at the 07-Sep evaluation, payment 03-Sep)
+    # restored that month's whole 0.09642 over the one-third share the
+    # (N2-N1)/N2 reading carried, landing ~0.381 here (C++ lane: 0.381160).
+    assert 0.36 < coupon < 0.41
     assert len(detail["unpaid_periods"]) == 6
     assert sum(x["unpaid_fixings"] for x in detail["unpaid_periods"]) == 111
     assert [x["payment_lag_days"] for x in detail["unpaid_periods"]] == [2, 4, 2, 2, 2, 2]
@@ -142,7 +144,10 @@ def test_coupon_stops_accruing_at_the_call_date() -> None:
         span = max(end_step - this_begin + 1, 1)
         paid_fraction = np.clip(call_step - this_begin + 1, 0, span) / span
         discount = np.exp(-market.rate * pricing_module.year_fraction(market.evaluation_date, pay))
-        accrual = float(deal["notional"]) * float(rate) * (unpaid / max(int(total), 1))
+        # An owed period is a whole coupon (see _coupon_pv): N1 is a status
+        # marker, not an amount share, so `unpaid/total` no longer enters. Only
+        # the callable clip truncates.
+        accrual = float(deal["notional"]) * float(rate)
         untruncated += accrual * discount
         truncated += (accrual * paid_fraction).mean() * discount
 

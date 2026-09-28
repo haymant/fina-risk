@@ -613,10 +613,16 @@ RiskResult price_fixture(const std::string& request_json, std::size_t paths, std
     // re-derivation. It is deliberately not bundled with the local-vol work.
     const double dt = 1.0 / 252.0;
     const double orthogonal_scale = std::sqrt(std::max(1.0 - correlation * correlation, 0.0));
+    // First step on which every underlying has latched, per path (`steps` when
+    // a path is never called). The coupon leg needs the *step*, not just the
+    // bool, so it can pay the elapsed fraction of each period up to the call,
+    // exactly like pricing.py's `_coupon_pv` does with its `call_date` array.
+    std::vector<int> call_steps(paths, steps);
     for (std::size_t p = 0; p < paths; ++p) {
         std::vector<double> log_spot(quoted.size());
         for (std::size_t i = 0; i < quoted.size(); ++i) log_spot[i] = std::log(quoted[i]);
         bool called = false;
+        int call_step = steps;
         // A path-level copy, seeded from the deal's own latch, because the two
         // underlyings share one latch state and the state has to persist across
         // fixings: a path where AMZN fell back under its call price after
@@ -639,15 +645,18 @@ RiskResult price_fixture(const std::string& request_json, std::size_t paths, std
                 if (std::exp(log_spot[i]) / refs[i] >= global_barrier) latched[i] = true;
                 if (!latched[i]) all_latched = false;
             }
-            if (all_latched) called = true;
+            if (all_latched && !called) {
+                called = true;
+                call_step = step;
+            }
         }
+        call_steps[p] = call_step;
         double worst = 10.0;
         for (std::size_t i = 0; i < refs.size(); ++i) worst = std::min(worst, std::exp(log_spot[i]) / refs[i]);
         const bool knock_in = !european_knock_in || worst <= ki_barrier;
         if (knock_in && !called) put += std::max(strike - worst, 0.0);
     }
     put = discount_factor * put / static_cast<double>(paths);
-    double coupon = 0.0;
     const auto& rg = deal.value("RGACCLKO", json::object());
     const auto ends = rg.value("endDate", json::array());
     const auto payments = rg.value("paymentDate", json::array());
@@ -660,12 +669,57 @@ RiskResult price_fixture(const std::string& request_json, std::size_t paths, std
     // was silently ignored on this path while being honoured on the other one.
     const double coupon_quote_scale = deal.value("legacyCouponQuoteScale", 10.0);
     const double notional = deal.value("notional", 1.0);
-    for (std::size_t i = 0; i < ends.size() && i < payments.size() && i < rates.size() && i < paid.size() && i < total.size(); ++i) {
-        const int unpaid = std::max(total.at(i).get<int>() - paid.at(i).get<int>(), 0);
-        const int fixings = std::max(total.at(i).get<int>(), 1);
-        coupon += coupon_quote_scale * rates.at(i).get<double>() * static_cast<double>(unpaid) / fixings
-            * std::exp(-rate * std::max(payments.at(i).get<int>() - evaluation_date, 0) / 365.0);
+    // Each period occupies the steps after the previous period's end through its
+    // own end step, inclusive, on the lane's own NYSE fixing grid -- the same
+    // window bookkeeping pricing.py's `_coupon_pv` does with `period_begin`.
+    // The window advances across every row (settled or not), so a skipped period
+    // still shifts the next one. Rows whose end predates the evaluation date all
+    // map to step 0 (their nearest fixing is the first one on/after today).
+    std::vector<int> end_step(ends.size());
+    std::vector<int> this_begin(ends.size());
+    {
+        int period_begin = 0;
+        for (std::size_t i = 0; i < ends.size(); ++i) {
+            const int end = ends.at(i).get<int>();
+            int best = 0;
+            for (int k = 1; k < steps; ++k) {
+                if (std::abs(schedule[k] - end) < std::abs(schedule[best] - end)) best = k;
+            }
+            end_step[i] = best;
+            this_begin[i] = period_begin;
+            period_begin = best + 1;
+        }
     }
+    // Coupon PV with the callable gate applied per path. A period that ended
+    // before the call pays in full; the period containing the call pays the
+    // fraction of the window through the call step; a period starting after the
+    // call pays nothing (`call_step` at `steps`, so `elapsed == span`). This is
+    // the C++ port of pricing.py's clip at :364-366 -- the coupon used to be a
+    // scalar loop here that never read the call at all and paid the whole
+    // schedule on every path.
+    double coupon = 0.0;
+    for (std::size_t p = 0; p < paths; ++p) {
+        double per_path = 0.0;
+        for (std::size_t i = 0; i < ends.size() && i < payments.size() && i < rates.size() && i < paid.size() && i < total.size(); ++i) {
+            // An owed period is counted in FULL, never a pro-ration. N1 marks how
+            // many fixings the as-of snapshot had booked -- a status marker, not
+            // an amount share; the term sheet accrues by Days-in / Total Days,
+            // and every owed period in this fixture is a complete month. The
+            // in-flight 1-Sep period (N1=14, N2=21, payment 03-Sep) is unpaid at
+            // the 07-Sep evaluation and pays the whole 0.9642% (block-book
+            // correction 8). This used to read
+            // `max(N2 - N1, 0) / max(N2, 1)`, which discounted that period at
+            // one third.
+            if (total.at(i).get<int>() - paid.at(i).get<int>() <= 0) continue;
+            const int span = std::max(end_step[i] - this_begin[i] + 1, 1);
+            const int elapsed = std::clamp(call_steps[p] - this_begin[i] + 1, 0, span);
+            per_path += coupon_quote_scale * rates.at(i).get<double>()
+                * (static_cast<double>(elapsed) / span)
+                * std::exp(-rate * std::max(payments.at(i).get<int>() - evaluation_date, 0) / 365.0);
+        }
+        coupon += per_path;
+    }
+    coupon /= static_cast<double>(paths);
     const double funding = discount_factor;
     const double pv = funding - put + coupon;
     return {pv, put, {{"PUT", -1, -put}, {"FUNDING", 1, funding}, {"COUPON", 1, coupon}}};

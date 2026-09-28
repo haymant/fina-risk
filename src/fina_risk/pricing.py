@@ -333,19 +333,16 @@ def _coupon_pv(deal: dict[str, Any], market: Market, path_log: np.ndarray) -> tu
         unpaid = max(int(total) - int(paid), 0)
         if unpaid <= 0:
             continue
-        total_fixings = max(int(total), 1)
-        # N1/N2 are the authoritative legacy fixing counters.  The current
-        # fixture's range is inactive (10% floor, no effective cap), so the
-        # unpaid fixing count is the exact accrued amount.  A future daily
-        # state backend can replace this with pathwise range-hit counts without
-        # changing the DTO or payment-lag convention.
-        accrual_fraction = np.full(paths, unpaid / total_fixings, dtype=float)
-        # Only unpaid fixings are carried into the current valuation.  For this
-        # legacy fixture N1 is zero in each future row, so this equals the full
-        # future period accrual; the field remains explicit for other states.
-        unpaid_fraction = unpaid / total_fixings
-        amount = float(deal.get("notional", 0.0)) * float(rate) * accrual_fraction
-        amount *= np.minimum(unpaid_fraction / np.maximum(accrual_fraction, 1e-12), 1.0)
+        # The unpaid amount is the FULL periodic coupon, never a pro-ration.
+        # The term sheet accrues by Days-in / Total Days, and every owed period
+        # in this fixture is a complete month, so an owed period is a whole
+        # coupon even when the as-of snapshot has only booked some of its
+        # fixings. N1 marks bookkeeping progress, not an amount share; counting
+        # the in-flight 1-Sep period at (21-14)/21 = 1/3 of the amount was the
+        # old reading and is wrong -- it is unpaid at the 07-Sep evaluation and
+        # pays the full 0.9642% (block-book correction 8). The callable clip
+        # below is the only truncation an amount carries.
+        amount = float(deal.get("notional", 0.0)) * float(rate)
         # The note stops paying coupons once it is called. `call_date` holds, per
         # path, the step on which every underlying was at or above the call
         # barrier on the same fixing, and stays at `steps` for a path that never
